@@ -10,7 +10,7 @@ Phase 4 is complete as of 2026-09-14. EchoSight 2.0 provides parent-folder model
 
 Multi-frame TIFF pages are expanded into independent in-memory frames. Each frame can be selected and inferred individually, or all frames can be processed with Run All. No duplicate TIFF files are written to disk.
 
-Current validation: all 24 automated tests pass in the full development workspace. The self-contained repository suite passes 18 tests and skips 6 checks when proprietary real-model/TIFF fixtures are unavailable. Phase 4 acceptance processed all 66 TIFF pages with the real `NVL_S28C_Detect_09092026_V17` package, producing 93 detections with no failed frames. `Test_Run_Instance_Segmentation` follows its embedded anomaly contract and also completed inference and export successfully.
+Current validation: all 28 automated tests pass in the full development workspace. Phase 4 acceptance processed all 66 TIFF pages with the real `NVL_S28C_Detect_09092026_V17` package, producing 93 detections with no failed frames. `Test_Run_Instance_Segmentation` follows its embedded anomaly contract and also completed inference and export successfully.
 
 ## Shared Network Setup
 
@@ -54,12 +54,15 @@ Select the trained model's parent folder. EchoSight recursively finds the deploy
 - Calibrated anomaly heatmaps and scores
 - Global overlay visibility controls
 - Per-frame annotation visibility controls
+- Mouse-wheel zoom, drag-to-pan, and double-click fit reset in both previews
+- Live brightness, contrast, sharpness, and denoising controls in the Analysis preview
+- Sortable frame, task, annotation-count, and highest-confidence results
 
 Results are generated from the embedded model task contract. A package whose name says instance segmentation but whose model metadata says anomaly will produce anomaly output.
 
 ## Result Export
 
-Use **Export Results** in the Results tab to choose a destination folder. EchoSight creates a unique timestamped run folder with:
+Use **Save All** or **Save Current** in the Results tab to choose a destination folder. EchoSight creates a unique timestamped run folder with:
 
 - annotated PNG images using the active preprocessing and visibility settings;
 - `results.csv` for filtering and downstream analysis;

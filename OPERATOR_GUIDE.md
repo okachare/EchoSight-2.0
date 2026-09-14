@@ -20,16 +20,22 @@ Double-click `Launch_EchoSight.bat` in the shared folder. Run `SETUP.ps1` again 
 1. Select **Load Model Folder** and choose the trained model's parent folder.
 2. Confirm the task, labels, thresholds, and preprocessing in **Model Information**.
 3. Select **Open Images** and choose one or more supported images or TIFF files.
-4. Select a frame and use **Run Current**, or use **Run All** for the complete list.
+4. Use **Run All** for the complete list, **Run Selected** for highlighted frames, or **Run Current** for the active frame.
 5. Review generated output in the **Results** tab.
 6. Use the overlay and annotation checkboxes to control exported visibility.
 
 Supported inputs are PNG, JPEG, BMP, WebP, TIFF, and multi-frame TIFF.
 
+During a multi-frame run, select **Pause** to stop before the next frame. The control changes to **Resume** and continues from the same position when selected again. **Cancel** stops the remaining frames while retaining completed results.
+
+Use the mouse wheel over either image preview to zoom and drag the image to pan. Double-click the preview to restore fit-to-view. In Analysis, select the settings icon at the lower-right of the preview to adjust brightness, contrast, sharpness, and denoising. Changes appear immediately and are applied to subsequent inference and exports.
+
+The Results table can be sorted by frame, task type, annotation count, or highest confidence. Select a column header to alternate ascending and descending order.
+
 ## Export Run Evidence
 
 1. Complete inference for the required frames.
-2. In **Results**, select **Export Results**.
+2. In **Results**, select **Save All** for every completed result or **Save Current** for the active result.
 3. Choose an existing destination folder.
 4. Wait for the completion message before closing EchoSight.
 
