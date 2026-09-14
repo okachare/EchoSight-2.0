@@ -1,0 +1,867 @@
+"""Tabbed desktop workspace for EchoSight 2.0."""
+
+from __future__ import annotations
+
+import logging
+import queue
+import threading
+import tkinter as tk
+from datetime import datetime
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
+
+from PIL import Image, ImageEnhance, ImageFilter, ImageTk
+
+from . import __version__
+from .exporting import ExportReport, export_run
+from .frames import SUPPORTED_IMAGES, LoadedFrame, load_frames
+from .inference import InferenceEngine, InferenceResult, ModelInfo, ModelLoader
+from .rendering import RenderOptions, render_result
+from .runtime import log_directory
+
+LOGGER = logging.getLogger(__name__)
+
+
+class FitImageCanvas(tk.Canvas):
+    """Canvas that always fits its image inside the available pane."""
+
+    def __init__(self, parent: tk.Misc) -> None:
+        super().__init__(parent, background="#090c0f", borderwidth=0, highlightthickness=0)
+        self.source_image: Image.Image | None = None
+        self.photo: ImageTk.PhotoImage | None = None
+        self.bind("<Configure>", lambda _: self._draw())
+
+    def set_image(self, image: Image.Image | None) -> None:
+        self.source_image = image
+        self._draw()
+
+    def _draw(self) -> None:
+        self.delete("all")
+        if self.source_image is None:
+            self.create_text(
+                max(1, self.winfo_width()) // 2,
+                max(1, self.winfo_height()) // 2,
+                text="Open an image to begin",
+                fill="#65717c",
+                font=("Segoe UI", 12),
+            )
+            return
+        width = max(1, self.winfo_width() - 24)
+        height = max(1, self.winfo_height() - 24)
+        preview = self.source_image.copy()
+        preview.thumbnail((width, height), Image.Resampling.LANCZOS)
+        self.photo = ImageTk.PhotoImage(preview)
+        self.create_image(self.winfo_width() // 2, self.winfo_height() // 2, image=self.photo)
+
+
+class ActivityIndicator(tk.Canvas):
+    """Small animated ring shown while background work is active."""
+
+    def __init__(self, parent: tk.Misc) -> None:
+        super().__init__(parent, width=28, height=28, background="#101419", borderwidth=0, highlightthickness=0)
+        self.angle = 0
+        self.running = False
+        self.job: str | None = None
+        self._draw()
+
+    def start(self) -> None:
+        if self.running:
+            return
+        self.running = True
+        self._animate()
+
+    def stop(self) -> None:
+        self.running = False
+        if self.job is not None:
+            self.after_cancel(self.job)
+            self.job = None
+        self._draw()
+
+    def _animate(self) -> None:
+        if not self.running:
+            return
+        self.angle = (self.angle + 18) % 360
+        self._draw()
+        self.job = self.after(45, self._animate)
+
+    def _draw(self) -> None:
+        self.delete("all")
+        color = "#25b9a7" if self.running else "#39434d"
+        self.create_oval(5, 5, 23, 23, outline="#263039", width=3)
+        self.create_arc(5, 5, 23, 23, start=self.angle, extent=105, style="arc", outline=color, width=3)
+
+
+class EchoSightApp(tk.Tk):
+    def __init__(self) -> None:
+        super().__init__()
+        self.title(f"EchoSight 2.0 | v{__version__}")
+        self.geometry("1420x880")
+        self.minsize(1040, 680)
+        self.configure(background="#101419")
+
+        self.model_path: Path | None = None
+        self.model_parent: Path | None = None
+        self.model_info: ModelInfo | None = None
+        self.inference_engine: InferenceEngine | None = None
+        self.frames: list[LoadedFrame] = []
+        self.results: dict[int, InferenceResult] = {}
+        self.inference_failures: dict[int, str] = {}
+        self.current_analysis_index: int | None = None
+        self.current_result_index: int | None = None
+        self.hidden_annotations: dict[int, set[int]] = {}
+        self.annotation_variables: list[tk.BooleanVar] = []
+        self.inference_running = False
+        self.export_running = False
+        self.cancel_inference = threading.Event()
+        self.model_events: queue.Queue[tuple[str, object]] = queue.Queue()
+        self.image_events: queue.Queue[tuple[str, object]] = queue.Queue()
+        self.inference_events: queue.Queue[tuple[str, object]] = queue.Queue()
+        self.export_events: queue.Queue[tuple[str, object]] = queue.Queue()
+
+        self.show_boxes = tk.BooleanVar(value=True)
+        self.show_labels = tk.BooleanVar(value=True)
+        self.show_masks = tk.BooleanVar(value=True)
+        self.show_heatmap = tk.BooleanVar(value=True)
+        self.brightness = tk.DoubleVar(value=1.0)
+        self.contrast = tk.DoubleVar(value=1.0)
+        self.sharpness = tk.DoubleVar(value=1.0)
+        self.denoise = tk.BooleanVar(value=False)
+
+        self._configure_styles()
+        self._build_layout()
+        self._log("EchoSight 2.0 session started")
+        self.protocol("WM_DELETE_WINDOW", self._close)
+
+    def _configure_styles(self) -> None:
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure("App.TFrame", background="#101419")
+        style.configure("Panel.TFrame", background="#181e25")
+        style.configure("Header.TLabel", background="#101419", foreground="#f4f7f9", font=("Segoe UI Semibold", 18))
+        style.configure("PanelTitle.TLabel", background="#181e25", foreground="#e7edf2", font=("Segoe UI Semibold", 10))
+        style.configure("PanelText.TLabel", background="#181e25", foreground="#aab5bf", font=("Segoe UI", 9))
+        style.configure("Accent.TButton", background="#25b9a7", foreground="#07110f", borderwidth=0, padding=(14, 8), font=("Segoe UI Semibold", 9))
+        style.map("Accent.TButton", background=[("active", "#42cdbc"), ("disabled", "#35413f")], foreground=[("disabled", "#84918f")])
+        style.configure("Tool.TButton", background="#252d36", foreground="#dce4ea", borderwidth=0, padding=(11, 7), font=("Segoe UI", 9))
+        style.map("Tool.TButton", background=[("active", "#323c47")])
+        style.configure("Panel.TCheckbutton", background="#181e25", foreground="#aab5bf", font=("Segoe UI", 9))
+        style.map("Panel.TCheckbutton", background=[("active", "#181e25")], foreground=[("active", "#e7edf2")])
+        style.configure("TNotebook", background="#101419", borderwidth=0)
+        style.configure("TNotebook.Tab", background="#202832", foreground="#8996a2", padding=(20, 8), font=("Segoe UI", 9))
+        style.map(
+            "TNotebook.Tab",
+            background=[("selected", "#25b9a7"), ("active", "#2b3540")],
+            foreground=[("selected", "#07110f"), ("active", "#eef3f6")],
+            padding=[("selected", (30, 13)), ("!selected", (20, 8))],
+            font=[("selected", ("Segoe UI Semibold", 11)), ("!selected", ("Segoe UI", 9))],
+        )
+        style.configure("Status.TLabel", background="#0b0e12", foreground="#92a0ac", padding=(12, 7), font=("Consolas", 9))
+
+    def _build_layout(self) -> None:
+        header = ttk.Frame(self, style="App.TFrame", padding=(20, 13, 20, 10))
+        header.pack(fill="x")
+        ttk.Label(header, text="EchoSight 2.0", style="Header.TLabel").pack(side="left")
+        self.activity = ActivityIndicator(header)
+        self.activity.pack(side="right", padx=(10, 0))
+        self.activity_text = tk.StringVar(value="Ready")
+        ttk.Label(header, textvariable=self.activity_text, style="Header.TLabel", font=("Segoe UI", 9)).pack(side="right")
+
+        self.notebook = ttk.Notebook(self)
+        self.notebook.pack(fill="both", expand=True, padx=14, pady=(0, 10))
+        self.analysis_tab = ttk.Frame(self.notebook, style="App.TFrame")
+        self.results_tab = ttk.Frame(self.notebook, style="App.TFrame")
+        self.notebook.add(self.analysis_tab, text="Analysis")
+        self.notebook.add(self.results_tab, text="Results")
+        self._build_analysis_tab()
+        self._build_results_tab()
+
+        self.status_text = tk.StringVar(value="Ready | Load a model and images")
+        ttk.Label(self, textvariable=self.status_text, style="Status.TLabel", anchor="w").pack(fill="x", side="bottom")
+
+    def _build_analysis_tab(self) -> None:
+        panes = ttk.Panedwindow(self.analysis_tab, orient="horizontal")
+        panes.pack(fill="both", expand=True)
+
+        sources = ttk.Frame(panes, style="Panel.TFrame", padding=12, width=250)
+        viewer = ttk.Frame(panes, style="Panel.TFrame")
+        side = ttk.Panedwindow(panes, orient="vertical", width=340)
+        panes.add(sources, weight=1)
+        panes.add(viewer, weight=4)
+        panes.add(side, weight=2)
+
+        ttk.Label(sources, text="SOURCES", style="PanelTitle.TLabel").pack(anchor="w", pady=(0, 8))
+        actions = ttk.Frame(sources, style="Panel.TFrame")
+        actions.pack(fill="x", pady=(0, 10))
+        self.load_model_button = ttk.Button(actions, text="Load Model Folder", style="Accent.TButton", command=self._select_model)
+        self.load_model_button.pack(fill="x")
+        self.open_images_button = ttk.Button(actions, text="Open Images", style="Tool.TButton", command=self._select_images)
+        self.open_images_button.pack(fill="x", pady=(6, 0))
+        self.model_name = tk.StringVar(value="No model loaded")
+        ttk.Label(sources, textvariable=self.model_name, style="PanelText.TLabel", wraplength=220).pack(anchor="w", pady=(0, 8))
+        self.image_list = self._new_listbox(sources)
+        self.image_list.pack(fill="both", expand=True)
+        self.image_list.bind("<<ListboxSelect>>", self._show_analysis_selection)
+
+        self.analysis_canvas = FitImageCanvas(viewer)
+        self.analysis_canvas.pack(fill="both", expand=True)
+
+        model_panel = ttk.Frame(side, style="Panel.TFrame", padding=12, height=340)
+        terminal_panel = ttk.Frame(side, style="Panel.TFrame", padding=12, height=260)
+        side.add(model_panel, weight=3)
+        side.add(terminal_panel, weight=2)
+        ttk.Label(model_panel, text="MODEL INFORMATION", style="PanelTitle.TLabel").pack(anchor="w")
+        model_info_area = ttk.Frame(model_panel, style="Panel.TFrame")
+        model_info_area.pack(fill="both", expand=True, pady=(8, 12))
+        model_scrollbar = ttk.Scrollbar(model_info_area, orient="vertical")
+        self.model_detail = tk.Text(
+            model_info_area,
+            background="#11161b",
+            foreground="#b9c5ce",
+            borderwidth=0,
+            wrap="word",
+            state="disabled",
+            font=("Consolas", 8),
+            yscrollcommand=model_scrollbar.set,
+        )
+        model_scrollbar.configure(command=self.model_detail.yview)
+        self.model_detail.pack(side="left", fill="both", expand=True)
+        model_scrollbar.pack(side="right", fill="y")
+        self._set_model_detail("Select the trained model's parent folder. EchoSight will locate the deployable OpenVINO IR or ONNX artifact.")
+        self._build_preprocess_controls(model_panel)
+        self.run_button = ttk.Button(model_panel, text="Run Current", style="Accent.TButton", state="disabled", command=self._run_current)
+        self.run_button.pack(fill="x", pady=(12, 0))
+        self.run_all_button = ttk.Button(model_panel, text="Run All", style="Tool.TButton", state="disabled", command=self._run_all)
+        self.run_all_button.pack(fill="x", pady=(6, 0))
+        self.cancel_button = ttk.Button(model_panel, text="Cancel", style="Tool.TButton", state="disabled", command=self._cancel_run)
+        self.cancel_button.pack(fill="x", pady=(6, 0))
+        self.progress = ttk.Progressbar(model_panel, mode="determinate", maximum=1)
+        self.progress.pack(fill="x", pady=(10, 0))
+
+        ttk.Label(terminal_panel, text="TERMINAL", style="PanelTitle.TLabel").pack(anchor="w")
+        self.terminal = tk.Text(terminal_panel, background="#0b0e12", foreground="#9fb0bd", insertbackground="#ffffff", borderwidth=0, wrap="word", state="disabled", font=("Consolas", 8))
+        self.terminal.pack(fill="both", expand=True, pady=(8, 0))
+
+    def _build_preprocess_controls(self, parent: ttk.Frame) -> None:
+        ttk.Label(parent, text="PREPROCESS", style="PanelTitle.TLabel").pack(anchor="w", pady=(4, 3))
+        for label, variable, start, end in (
+            ("Brightness", self.brightness, 0.5, 1.5),
+            ("Contrast", self.contrast, 0.5, 1.5),
+            ("Sharpness", self.sharpness, 0.5, 2.0),
+        ):
+            row = ttk.Frame(parent, style="Panel.TFrame")
+            row.pack(fill="x")
+            ttk.Label(row, text=label, style="PanelText.TLabel", width=10).pack(side="left")
+            ttk.Scale(row, variable=variable, from_=start, to=end, command=lambda _: self._refresh_analysis()).pack(side="left", fill="x", expand=True)
+        ttk.Checkbutton(parent, text="Denoise", variable=self.denoise, command=self._refresh_analysis, style="Panel.TCheckbutton").pack(anchor="w")
+
+    def _build_results_tab(self) -> None:
+        panes = ttk.Panedwindow(self.results_tab, orient="horizontal")
+        panes.pack(fill="both", expand=True)
+        result_list_panel = ttk.Frame(panes, style="Panel.TFrame", padding=12, width=280)
+        result_viewer = ttk.Frame(panes, style="Panel.TFrame")
+        detail_panel = ttk.Frame(panes, style="Panel.TFrame", padding=12, width=330)
+        panes.add(result_list_panel, weight=1)
+        panes.add(result_viewer, weight=4)
+        panes.add(detail_panel, weight=2)
+
+        ttk.Label(result_list_panel, text="RESULT FRAMES", style="PanelTitle.TLabel").pack(anchor="w", pady=(0, 8))
+        self.result_list = self._new_listbox(result_list_panel)
+        self.result_list.pack(fill="both", expand=True)
+        self.result_list.bind("<<ListboxSelect>>", self._show_result_selection)
+        self.results_canvas = FitImageCanvas(result_viewer)
+        self.results_canvas.pack(fill="both", expand=True)
+
+        ttk.Label(detail_panel, text="RESULT DETAILS", style="PanelTitle.TLabel").pack(anchor="w")
+        self.result_text = tk.StringVar(value="Run inference in Analysis to populate results.")
+        ttk.Label(detail_panel, textvariable=self.result_text, style="PanelText.TLabel", wraplength=295, justify="left").pack(anchor="w", pady=(8, 12))
+        ttk.Label(detail_panel, text="OVERLAYS", style="PanelTitle.TLabel").pack(anchor="w")
+        for text, variable in (("Bounding boxes", self.show_boxes), ("Labels", self.show_labels), ("Instance masks", self.show_masks), ("Anomaly heatmap", self.show_heatmap)):
+            ttk.Checkbutton(detail_panel, text=text, variable=variable, command=self._refresh_result, style="Panel.TCheckbutton").pack(anchor="w")
+        self.export_button = ttk.Button(
+            detail_panel,
+            text="Export Results",
+            style="Accent.TButton",
+            state="disabled",
+            command=self._select_export_destination,
+        )
+        self.export_button.pack(fill="x", pady=(14, 0))
+        ttk.Label(detail_panel, text="ANNOTATIONS", style="PanelTitle.TLabel").pack(anchor="w", pady=(14, 5))
+        annotation_area = ttk.Frame(detail_panel, style="Panel.TFrame")
+        annotation_area.pack(fill="both", expand=True)
+        self.annotation_canvas = tk.Canvas(annotation_area, background="#181e25", borderwidth=0, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(annotation_area, orient="vertical", command=self.annotation_canvas.yview)
+        self.annotation_container = ttk.Frame(self.annotation_canvas, style="Panel.TFrame")
+        self.annotation_window = self.annotation_canvas.create_window((0, 0), window=self.annotation_container, anchor="nw")
+        self.annotation_canvas.configure(yscrollcommand=scrollbar.set)
+        self.annotation_canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        self.annotation_container.bind("<Configure>", lambda _: self.annotation_canvas.configure(scrollregion=self.annotation_canvas.bbox("all")))
+        self.annotation_canvas.bind("<Configure>", lambda event: self.annotation_canvas.itemconfigure(self.annotation_window, width=event.width))
+
+    @staticmethod
+    def _new_listbox(parent: tk.Misc) -> tk.Listbox:
+        return tk.Listbox(parent, background="#11161b", foreground="#c9d2da", selectbackground="#247f76", selectforeground="#ffffff", borderwidth=0, highlightthickness=0, activestyle="none", font=("Segoe UI", 9), exportselection=False)
+
+    def _select_model(self) -> None:
+        selected = filedialog.askdirectory(title="Select trained model parent folder", mustexist=True)
+        if not selected:
+            return
+        parent = Path(selected)
+        try:
+            models = ModelLoader.discover(parent)
+        except OSError as error:
+            self._log(f"ERROR | Model folder could not be searched: {error}")
+            messagebox.showerror("Model folder error", str(error))
+            return
+        if not models:
+            message = "No supported model was found below this folder. Expected an OpenVINO .xml/.bin pair or an ONNX file."
+            self._log(f"ERROR | {message} | {parent}")
+            messagebox.showerror("No model found", message)
+            return
+        if len(models) > 1:
+            preview = "\n".join(f"- {path.relative_to(parent.resolve())}" for path in models[:6])
+            message = f"This folder contains {len(models)} distinct models. Select the direct parent folder for one trained model.\n\n{preview}"
+            self._log(f"ERROR | Multiple models found below {parent}: {len(models)}")
+            messagebox.showerror("Multiple models found", message)
+            return
+        path = models[0]
+        self.model_path = None
+        self.model_parent = parent
+        self.model_info = None
+        self.inference_engine = None
+        self.results.clear()
+        self.inference_failures.clear()
+        self._clear_results_ui()
+        self.model_name.set(parent.name)
+        self._set_model_detail("Reading model metadata and preparing CPU compilation...")
+        self._set_activity(f"Reading model | {path.name}", True)
+        self.load_model_button.configure(state="disabled")
+        self._log(f"Model folder: {parent}")
+        self._log(f"Discovered model: {path.relative_to(parent.resolve())}")
+        threading.Thread(target=self._model_worker, args=(path, parent), daemon=True).start()
+        self.after(100, self._poll_model)
+
+    def _model_worker(self, path: Path, parent: Path) -> None:
+        try:
+            loader = ModelLoader()
+            self.model_events.put(("progress", f"Inspecting metadata | {path.name}"))
+            info = loader.inspect(path, parent)
+            self.model_events.put(("progress", f"Compiling {info.model_type or info.task_type.value} for CPU"))
+            model = loader.core.read_model(info.path)
+            compiled = loader.core.compile_model(model, loader.device)
+            self.model_events.put(("loaded", (info, compiled)))
+        except Exception as error:
+            LOGGER.exception("Model loading failed")
+            self.model_events.put(("error", error))
+
+    def _poll_model(self) -> None:
+        try:
+            event, payload = self.model_events.get_nowait()
+        except queue.Empty:
+            self.after(100, self._poll_model)
+            return
+        if event == "progress":
+            self._set_activity(str(payload), True)
+            self._log(str(payload))
+            self.after(50, self._poll_model)
+            return
+        self.load_model_button.configure(state="normal")
+        self._set_activity("Ready", False)
+        if event == "error":
+            self.model_name.set("No model loaded")
+            self._set_model_detail("Model loading failed. See Terminal and application log.")
+            self._log(f"ERROR | Model loading failed: {payload}")
+            messagebox.showerror("Model loading error", str(payload))
+            return
+        self.model_info, compiled = payload
+        self.model_path = self.model_info.path
+        self.inference_engine = InferenceEngine(self.model_info, compiled)
+        size = self.model_info.input_size
+        input_description = f"{size[1]} x {size[0]}" if size else "Dynamic"
+        outputs = "\n".join(f"  {item.name}: {item.shape}" for item in self.model_info.outputs)
+        labels = ", ".join(self.model_info.labels) if self.model_info.labels else "Embedded or unavailable"
+        metadata = dict(self.model_info.metadata)
+        metrics = "\n".join(f"  {name}: {value:.2%}" for name, value in self.model_info.metrics) or "  Not available with this export"
+        collaterals = ", ".join(self.model_info.collaterals) or "Embedded model metadata only"
+        self._set_model_detail(
+            f"Model: {metadata.get('model_name', self.model_info.path.stem)}\n"
+            f"Model type: {self.model_info.model_type or 'Not embedded'}\n"
+            f"Model version: {metadata.get('model_version', 'Not embedded')}\n"
+            f"GetiTune version: {metadata.get('getitune_version', 'Not embedded')}\n"
+            f"Task: {self.model_info.task_type.value.replace('_', ' ').title()}\n"
+            f"Generated output: {self.model_info.output_mode}\n"
+            f"Format / device: {self.model_info.format} / {self.model_info.device}\n"
+            f"Training completed: {self.model_info.training_date or 'Not available'}\n"
+            f"Exported / modified: {self.model_info.artifact_date or 'Not available'}\n"
+            f"Package folder: {self.model_parent.name if self.model_parent else 'Not available'}\n"
+            f"Package collateral: {collaterals}\n"
+            f"Artifact: {self.model_info.path.name} ({self.model_info.path.stat().st_size / 1_048_576:.1f} MB)\n\n"
+            f"Labels ({len(self.model_info.labels)}): {labels}\n"
+            f"Confidence threshold: {self.model_info.confidence_threshold:.1%}\n"
+            f"IoU threshold: {self._metadata_percent(metadata, 'iou_threshold')}\n\n"
+            f"Input: {input_description} | {self.model_info.inputs[0].element_type}\n"
+            f"Resize: {metadata.get('resize_type', 'Not embedded')}\n"
+            f"Intensity: {metadata.get('intensity_mode', 'Not embedded')}\n"
+            f"Mean: {metadata.get('mean_values', 'Not embedded')}\n"
+            f"Scale: {metadata.get('scale_values', 'Not embedded')}\n"
+            f"Reverse channels: {metadata.get('reverse_input_channels', 'Not embedded')}\n"
+            f"Outputs:\n{outputs}\n\nEvaluation scores:\n{metrics}"
+        )
+        self._log(
+            f"Model ready | {metadata.get('model_name', self.model_info.task_type.value)} | "
+            f"threshold {self.model_info.confidence_threshold:.1%} | {len(self.model_info.metrics)} metric(s)"
+        )
+        self._update_run_state()
+
+    def _select_images(self) -> None:
+        selected = filedialog.askopenfilenames(title="Select images or TIFF files", filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp"), ("All files", "*.*")])
+        if not selected:
+            return
+        paths = [Path(item) for item in selected if Path(item).suffix.lower() in SUPPORTED_IMAGES]
+        self.open_images_button.configure(state="disabled")
+        self._set_activity("Loading images", True)
+        self._log(f"Loading {len(paths)} image file(s)")
+        threading.Thread(target=self._image_worker, args=(paths,), daemon=True).start()
+        self.after(100, self._poll_images)
+
+    def _image_worker(self, paths: list[Path]) -> None:
+        frames: list[LoadedFrame] = []
+        errors: list[str] = []
+        for file_position, path in enumerate(paths, start=1):
+            try:
+                def report(
+                    frame_number: int,
+                    frame_count: int,
+                    current_file: int = file_position,
+                    current_name: str = path.name,
+                ) -> None:
+                    self.image_events.put(("progress", (current_file, len(paths), current_name, frame_number, frame_count)))
+
+                frames.extend(load_frames(path, report))
+            except (OSError, ValueError) as error:
+                errors.append(f"{path.name}: {error}")
+        self.image_events.put(("loaded", (frames, errors, len(paths))))
+
+    def _poll_images(self) -> None:
+        try:
+            event, payload = self.image_events.get_nowait()
+        except queue.Empty:
+            self.after(100, self._poll_images)
+            return
+        if event == "progress":
+            file_position, file_count, name, frame_number, frame_count = payload
+            detail = f"Loading {name} | Frame {frame_number}/{frame_count} | File {file_position}/{file_count}"
+            self._set_activity(detail, True)
+            self._log(detail)
+            self.after(10, self._poll_images)
+            return
+        self.frames, errors, count = payload
+        self.results.clear()
+        self.inference_failures.clear()
+        self.hidden_annotations.clear()
+        self.image_list.delete(0, tk.END)
+        self._clear_results_ui()
+        for frame in self.frames:
+            self.image_list.insert(tk.END, frame.display_name)
+        if self.frames:
+            self.image_list.selection_set(0)
+            self._select_analysis_frame(0)
+        self.open_images_button.configure(state="normal")
+        self._set_activity("Ready", False)
+        self._log(f"Loaded {len(self.frames)} frame(s) from {count} file(s)")
+        for error in errors:
+            self._log(f"ERROR | {error}")
+        self._update_run_state()
+
+    def _show_analysis_selection(self, _event: object) -> None:
+        selection = self.image_list.curselection()
+        if selection:
+            self._select_analysis_frame(selection[0])
+
+    def _select_analysis_frame(self, index: int) -> None:
+        self.current_analysis_index = index
+        self._refresh_analysis()
+        frame = self.frames[index]
+        self.status_text.set(f"{frame.display_name} | {frame.image.width} x {frame.image.height}")
+
+    @staticmethod
+    def _process_image(image: Image.Image, settings: tuple[float, float, float, bool]) -> Image.Image:
+        brightness, contrast, sharpness, denoise = settings
+        processed = ImageEnhance.Brightness(image).enhance(brightness)
+        processed = ImageEnhance.Contrast(processed).enhance(contrast)
+        processed = ImageEnhance.Sharpness(processed).enhance(sharpness)
+        return processed.filter(ImageFilter.MedianFilter(3)) if denoise else processed
+
+    def _preprocess_settings(self) -> tuple[float, float, float, bool]:
+        return self.brightness.get(), self.contrast.get(), self.sharpness.get(), self.denoise.get()
+
+    def _processed_image(self, image: Image.Image) -> Image.Image:
+        return self._process_image(image, self._preprocess_settings())
+
+    def _refresh_analysis(self) -> None:
+        if self.current_analysis_index is not None and self.current_analysis_index < len(self.frames):
+            self.analysis_canvas.set_image(self._processed_image(self.frames[self.current_analysis_index].image))
+
+    def _run_current(self) -> None:
+        selection = self.image_list.curselection()
+        if selection:
+            index = selection[0]
+            self._start_inference([(index, self.frames[index])])
+
+    def _run_all(self) -> None:
+        self._start_inference(list(enumerate(self.frames)))
+
+    def _start_inference(self, frames: list[tuple[int, LoadedFrame]]) -> None:
+        if self.inference_engine is None or self.inference_running or not frames:
+            return
+        self.inference_running = True
+        self.cancel_inference.clear()
+        self.progress.configure(maximum=len(frames), value=0)
+        self.load_model_button.configure(state="disabled")
+        self.open_images_button.configure(state="disabled")
+        self.cancel_button.configure(state="normal")
+        self._update_run_state()
+        self._set_activity("Running inference", True)
+        self._log(f"Inference started | {len(frames)} frame(s)")
+        settings = self._preprocess_settings()
+        for index, _frame in frames:
+            self.inference_failures.pop(index, None)
+        threading.Thread(target=self._inference_worker, args=(frames, settings), daemon=True).start()
+        self.after(100, self._poll_inference)
+
+    def _inference_worker(
+        self,
+        frames: list[tuple[int, LoadedFrame]],
+        settings: tuple[float, float, float, bool],
+    ) -> None:
+        completed = 0
+        failed = 0
+        try:
+            for position, (index, frame) in enumerate(frames, start=1):
+                if self.cancel_inference.is_set():
+                    self.inference_events.put(("cancelled", completed))
+                    return
+                self.inference_events.put(("progress", (position, len(frames), frame.display_name)))
+                try:
+                    image = self._process_image(frame.image, settings)
+                    result = self.inference_engine.infer(image, frame.source)
+                    completed += 1
+                    self.inference_events.put(("result", (position, len(frames), index, result)))
+                except Exception as error:
+                    failed += 1
+                    LOGGER.exception("Inference failed for %s", frame.display_name)
+                    self.inference_events.put(("failure", (position, len(frames), index, frame.display_name, str(error))))
+            self.inference_events.put(("complete", (completed, failed)))
+        except Exception as error:
+            LOGGER.exception("Inference failed")
+            self.inference_events.put(("error", error))
+
+    def _poll_inference(self) -> None:
+        try:
+            event, payload = self.inference_events.get_nowait()
+        except queue.Empty:
+            self.after(100, self._poll_inference)
+            return
+        if event == "progress":
+            position, total, name = payload
+            detail = f"Inferencing {name} | Frame {position}/{total}"
+            self._set_activity(detail, True)
+            self._log(detail)
+            self.after(10, self._poll_inference)
+            return
+        if event == "result":
+            position, total, index, result = payload
+            first_result = not self.results
+            self.results[index] = result
+            self.inference_failures.pop(index, None)
+            self.progress.configure(value=position)
+            self._refresh_result_list()
+            self._log(f"Frame {index + 1}/{len(self.frames)} | {result.summary} | {result.duration_ms:.1f} ms")
+            if first_result:
+                self._select_result_frame(index)
+            self.status_text.set(f"Processed {position} of {total}")
+            self.after(10, self._poll_inference)
+            return
+        if event == "failure":
+            position, total, index, name, message = payload
+            self.results.pop(index, None)
+            self.inference_failures[index] = message
+            self.hidden_annotations.pop(index, None)
+            self.progress.configure(value=position)
+            self._refresh_result_list()
+            if self.current_result_index == index:
+                self.current_result_index = None
+                self.results_canvas.set_image(None)
+                self.result_text.set(f"Inference failed for {name}\n\n{message}")
+            self._log(f"ERROR | {name} | {message}")
+            self.status_text.set(f"Processed {position} of {total} | 1 failure")
+            self.after(10, self._poll_inference)
+            return
+        if event == "error":
+            self._log(f"ERROR | Inference failed: {payload}")
+            self._finish_inference("Inference failed")
+            messagebox.showerror("Inference error", str(payload))
+        elif event == "cancelled":
+            self._finish_inference(f"Cancelled after {payload} frame(s)")
+        else:
+            completed, failed = payload
+            self._finish_inference(f"Inference complete: {completed} succeeded, {failed} failed")
+
+    def _finish_inference(self, status: str) -> None:
+        self.inference_running = False
+        self.load_model_button.configure(state="normal")
+        self.open_images_button.configure(state="normal")
+        self.cancel_button.configure(state="disabled")
+        self._set_activity("Ready", False)
+        self.status_text.set(status)
+        self._log(status)
+        self._update_run_state()
+
+    def _cancel_run(self) -> None:
+        self.cancel_inference.set()
+        self.cancel_button.configure(state="disabled")
+        self._log("Cancellation requested")
+
+    def _refresh_result_list(self) -> None:
+        ordered = sorted(self.results)
+        self.result_list.delete(0, tk.END)
+        for index in ordered:
+            result = self.results[index]
+            self.result_list.insert(tk.END, f"{self.frames[index].display_name}  |  {result.summary}")
+
+    def _show_result_selection(self, _event: object) -> None:
+        selection = self.result_list.curselection()
+        if selection:
+            self._select_result_frame(sorted(self.results)[selection[0]])
+
+    def _select_result_frame(self, index: int) -> None:
+        self.current_result_index = index
+        ordered = sorted(self.results)
+        if index in ordered:
+            position = ordered.index(index)
+            self.result_list.selection_clear(0, tk.END)
+            self.result_list.selection_set(position)
+            self.result_list.see(position)
+        self._refresh_result()
+        self._show_result_details(self.results[index])
+
+    def _refresh_result(self) -> None:
+        if self.current_result_index is None or self.current_result_index not in self.results:
+            return
+        index = self.current_result_index
+        rendered = render_result(
+            self._processed_image(self.frames[index].image),
+            self.results[index],
+            self._render_options(),
+            self.hidden_annotations.get(index, set()),
+        )
+        self.results_canvas.set_image(rendered)
+
+    def _render_options(self) -> RenderOptions:
+        return RenderOptions(self.show_boxes.get(), self.show_labels.get(), self.show_masks.get(), self.show_heatmap.get())
+
+    def _select_export_destination(self) -> None:
+        if self.model_info is None or (not self.results and not self.inference_failures):
+            return
+        selected = filedialog.askdirectory(title="Select folder for exported run", mustexist=True)
+        if not selected:
+            return
+        settings = self._preprocess_settings()
+        preprocessing = {
+            "brightness": settings[0],
+            "contrast": settings[1],
+            "sharpness": settings[2],
+            "denoise": settings[3],
+        }
+        self.export_running = True
+        self.load_model_button.configure(state="disabled")
+        self.open_images_button.configure(state="disabled")
+        self._update_run_state()
+        self._set_activity("Exporting results", True)
+        self._log(f"Export started | {len(self.results)} result(s), {len(self.inference_failures)} failure(s)")
+        threading.Thread(
+            target=self._export_worker,
+            args=(
+                Path(selected),
+                list(self.frames),
+                dict(self.results),
+                self.model_info,
+                self.model_parent,
+                preprocessing,
+                settings,
+                self._render_options(),
+                {index: set(hidden) for index, hidden in self.hidden_annotations.items()},
+                dict(self.inference_failures),
+            ),
+            daemon=True,
+        ).start()
+        self.after(100, self._poll_export)
+
+    def _export_worker(
+        self,
+        destination: Path,
+        frames: list[LoadedFrame],
+        results: dict[int, InferenceResult],
+        model_info: ModelInfo,
+        model_parent: Path | None,
+        preprocessing: dict[str, object],
+        settings: tuple[float, float, float, bool],
+        render_options: RenderOptions,
+        hidden_annotations: dict[int, set[int]],
+        failures: dict[int, str],
+    ) -> None:
+        try:
+            report = export_run(
+                destination=destination,
+                frames=frames,
+                results=results,
+                model_info=model_info,
+                model_parent=model_parent,
+                preprocessing=preprocessing,
+                render_options=render_options,
+                hidden_annotations=hidden_annotations,
+                failures=failures,
+                image_transform=lambda image: self._process_image(image, settings),
+                progress=lambda position, total, name: self.export_events.put(("progress", (position, total, name))),
+            )
+            self.export_events.put(("complete", report))
+        except Exception as error:
+            LOGGER.exception("Result export failed")
+            self.export_events.put(("error", error))
+
+    def _poll_export(self) -> None:
+        try:
+            event, payload = self.export_events.get_nowait()
+        except queue.Empty:
+            self.after(100, self._poll_export)
+            return
+        if event == "progress":
+            position, total, name = payload
+            detail = f"Exporting {name} | Frame {position}/{total}"
+            self._set_activity(detail, True)
+            self._log(detail)
+            self.after(10, self._poll_export)
+            return
+        self.export_running = False
+        self.load_model_button.configure(state="normal")
+        self.open_images_button.configure(state="normal")
+        self._set_activity("Ready", False)
+        self._update_run_state()
+        if event == "error":
+            self._log(f"ERROR | Export failed: {payload}")
+            messagebox.showerror("Export error", str(payload))
+            return
+        report: ExportReport = payload
+        self.status_text.set(f"Export complete: {report.directory}")
+        self._log(f"Export complete | {report.directory}")
+        messagebox.showinfo(
+            "Export complete",
+            f"Exported {report.exported_frames} result(s) and {report.failed_frames} failure(s).\n\n{report.directory}",
+        )
+
+    def _show_result_details(self, result: InferenceResult) -> None:
+        lines = [result.summary, f"Inference: {result.duration_ms:.1f} ms", f"Input: {result.input_size[0]} x {result.input_size[1]}"]
+        lines.extend(f"{item.label}: {item.confidence:.1%}" for item in result.detections)
+        lines.extend(f"{item.label}: {item.confidence:.1%}" for item in result.classifications)
+        self.result_text.set("\n".join(lines))
+        self._build_annotation_controls(result)
+
+    def _build_annotation_controls(self, result: InferenceResult) -> None:
+        for child in self.annotation_container.winfo_children():
+            child.destroy()
+        self.annotation_variables.clear()
+        entries: list[str] = []
+        if result.anomaly_score is not None:
+            entries.append(f"Anomaly heatmap | {result.anomaly_score:.1%}")
+        entries.extend(f"{item.label} | {item.confidence:.1%}" for item in result.detections)
+        entries.extend(f"{item.label} | {item.confidence:.1%}" for item in result.classifications)
+        if not entries:
+            ttk.Label(self.annotation_container, text="No annotations", style="PanelText.TLabel").pack(anchor="w")
+            return
+        hidden = self.hidden_annotations.setdefault(self.current_result_index, set())
+        for index, text in enumerate(entries):
+            variable = tk.BooleanVar(value=index not in hidden)
+            self.annotation_variables.append(variable)
+            ttk.Checkbutton(
+                self.annotation_container,
+                text=text,
+                variable=variable,
+                command=lambda annotation=index, state=variable: self._toggle_annotation(annotation, state),
+                style="Panel.TCheckbutton",
+            ).pack(anchor="w", pady=2)
+
+    def _toggle_annotation(self, index: int, state: tk.BooleanVar) -> None:
+        if self.current_result_index is None:
+            return
+        hidden = self.hidden_annotations.setdefault(self.current_result_index, set())
+        hidden.discard(index) if state.get() else hidden.add(index)
+        self._refresh_result()
+
+    def _clear_results_ui(self) -> None:
+        self.result_list.delete(0, tk.END)
+        self.results_canvas.set_image(None)
+        self.result_text.set("Run inference in Analysis to populate results.")
+        for child in self.annotation_container.winfo_children():
+            child.destroy()
+        self.current_result_index = None
+
+    def _update_run_state(self) -> None:
+        state = "normal" if self.inference_engine and self.frames and not self.inference_running and not self.export_running else "disabled"
+        self.run_button.configure(state=state)
+        self.run_all_button.configure(state=state)
+        export_state = "normal" if self.model_info and (self.results or self.inference_failures) and not self.inference_running and not self.export_running else "disabled"
+        self.export_button.configure(state=export_state)
+
+    def _set_activity(self, text: str, active: bool) -> None:
+        self.activity_text.set(text)
+        self.status_text.set(text)
+        self.activity.start() if active else self.activity.stop()
+
+    def _set_model_detail(self, text: str) -> None:
+        self.model_detail.configure(state="normal")
+        self.model_detail.delete("1.0", tk.END)
+        self.model_detail.insert("1.0", text)
+        self.model_detail.configure(state="disabled")
+
+    @staticmethod
+    def _metadata_percent(metadata: dict[str, str], key: str) -> str:
+        try:
+            return f"{float(metadata[key]):.1%}"
+        except (KeyError, ValueError):
+            return "Not embedded"
+
+    def _log(self, message: str) -> None:
+        timestamp = datetime.now().astimezone().strftime("%H:%M:%S")
+        line = f"{timestamp} | {message}"
+        LOGGER.info(message)
+        self.terminal.configure(state="normal")
+        self.terminal.insert(tk.END, line + "\n")
+        self.terminal.see(tk.END)
+        self.terminal.configure(state="disabled")
+
+    def _close(self) -> None:
+        self.cancel_inference.set()
+        self.destroy()
+
+
+def configure_logging() -> Path:
+    directory = log_directory()
+    directory.mkdir(parents=True, exist_ok=True)
+    log_path = directory / f"app-{datetime.now().astimezone():%Y%m%d}.log"
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s", handlers=[logging.FileHandler(log_path, encoding="utf-8")])
+    return log_path
+
+
+def main() -> int:
+    log_path = configure_logging()
+    try:
+        app = EchoSightApp()
+        app.mainloop()
+        return 0
+    except Exception as error:
+        LOGGER.exception("EchoSight 2.0 failed to start")
+        try:
+            messagebox.showerror("EchoSight 2.0 startup error", f"{error}\n\nLog: {log_path}")
+        except tk.TclError:
+            pass
+        return 1

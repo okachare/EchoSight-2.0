@@ -1,0 +1,4 @@
+numpy>=1.26,<2
+Pillow>=10,<11
+openvino==2024.5.0
+onnxruntime>=1.18,<1.20
