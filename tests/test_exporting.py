@@ -4,8 +4,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
-
 from echosight2.exporting import export_run
 from echosight2.frames import LoadedFrame
 from echosight2.inference import (
@@ -16,6 +14,7 @@ from echosight2.inference import (
     TensorInfo,
 )
 from echosight2.rendering import RenderOptions
+from PIL import Image
 
 
 def _model_info(model_path: Path, task: TaskType = TaskType.DETECTION) -> ModelInfo:
@@ -67,7 +66,15 @@ def test_export_run_writes_reproducible_detection_artifacts(tmp_path: Path) -> N
         model_info=_model_info(model_path),
         model_parent=tmp_path,
         preprocessing={"brightness": 1.0, "contrast": 1.0},
-        render_options=RenderOptions(show_labels=False),
+        render_options=RenderOptions(
+            show_labels=False,
+            font_size=16,
+            annotation_color=(12, 34, 56),
+            annotation_thickness=5,
+            annotation_opacity=0.75,
+            label_opacity=0.6,
+        ),
+        render_options_by_frame={0: RenderOptions(font_size=20, annotation_color=(90, 80, 70))},
         failures={1: "Unsupported frame data"},
         exported_at=datetime(2026, 9, 10, 12, 30, tzinfo=timezone.utc),
     )
@@ -85,6 +92,14 @@ def test_export_run_writes_reproducible_detection_artifacts(tmp_path: Path) -> N
     assert manifest["model"]["confidence_threshold"] == 0.1
     assert manifest["processing"]["user_preprocessing"]["brightness"] == 1.0
     assert manifest["processing"]["render_options"]["show_labels"] is False
+    assert manifest["processing"]["render_options"]["font_family"] == "Calibri"
+    assert manifest["processing"]["render_options"]["font_size"] == 16
+    assert manifest["processing"]["render_options"]["annotation_color"] == [12, 34, 56]
+    assert manifest["processing"]["render_options"]["annotation_thickness"] == 5
+    assert manifest["processing"]["render_options"]["annotation_opacity"] == 0.75
+    assert manifest["processing"]["render_options"]["label_opacity"] == 0.6
+    assert manifest["processing"]["render_options_by_frame"]["0"]["font_size"] == 20
+    assert manifest["processing"]["render_options_by_frame"]["0"]["annotation_color"] == [90, 80, 70]
     assert manifest["summary"]["exported_frames"] == 1
     assert manifest["summary"]["failed_frames"] == 1
     assert manifest["frames"][0]["detections"][0]["label"] == "Delamination"

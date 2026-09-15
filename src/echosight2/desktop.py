@@ -6,9 +6,10 @@ import logging
 import queue
 import threading
 import tkinter as tk
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import colorchooser, filedialog, messagebox, ttk
 
 from PIL import Image, ImageEnhance, ImageFilter, ImageTk
 
@@ -18,6 +19,7 @@ from .frames import SUPPORTED_IMAGES, LoadedFrame, load_frames
 from .inference import InferenceEngine, InferenceResult, ModelInfo, ModelLoader
 from .rendering import RenderOptions, render_result
 from .runtime import log_directory
+from .training import export_training_frames
 
 LOGGER = logging.getLogger(__name__)
 
@@ -156,10 +158,15 @@ class EchoSightApp(tk.Tk):
         self.current_analysis_index: int | None = None
         self.current_result_index: int | None = None
         self.hidden_annotations: dict[int, set[int]] = {}
+        self.preprocess_profiles: dict[int, tuple[float, float, float, float]] = {}
+        self.annotation_profiles: dict[int, RenderOptions] = {}
         self.annotation_variables: list[tk.BooleanVar] = []
         self.result_sort_column = "frame"
         self.result_sort_descending = False
         self.preprocess_popup: tk.Toplevel | None = None
+        self.annotation_popup: tk.Toplevel | None = None
+        self.annotation_color: tuple[int, int, int] | None = None
+        self.choosing_annotation_color = False
         self.inference_running = False
         self.export_running = False
         self.cancel_inference = threading.Event()
@@ -174,15 +181,27 @@ class EchoSightApp(tk.Tk):
         self.show_labels = tk.BooleanVar(value=True)
         self.show_masks = tk.BooleanVar(value=True)
         self.show_heatmap = tk.BooleanVar(value=True)
+        self.annotation_font_size = tk.DoubleVar(value=10.0)
+        self.annotation_thickness = tk.DoubleVar(value=3.0)
+        self.annotation_transparency = tk.DoubleVar(value=0.0)
+        self.label_transparency = tk.DoubleVar(value=0.0)
         self.brightness = tk.DoubleVar(value=1.0)
         self.contrast = tk.DoubleVar(value=1.0)
         self.sharpness = tk.DoubleVar(value=1.0)
-        self.denoise = tk.BooleanVar(value=False)
+        self.denoise_strength = tk.DoubleVar(value=0.0)
 
         self._configure_styles()
         self._build_layout()
         self._log("EchoSight 2.0 session started")
         self.protocol("WM_DELETE_WINDOW", self._close)
+        self.bind_all("<Button-1>", self._dismiss_popups, add="+")
+        self.after_idle(self._maximize_window)
+
+    def _maximize_window(self) -> None:
+        try:
+            self.state("zoomed")
+        except tk.TclError:
+            self.attributes("-fullscreen", True)
 
     def _configure_styles(self) -> None:
         style = ttk.Style(self)
@@ -256,7 +275,7 @@ class EchoSightApp(tk.Tk):
         ttk.Label(sources, text="SOURCES", style="PanelTitle.TLabel").pack(anchor="w", pady=(0, 8))
         actions = ttk.Frame(sources, style="Panel.TFrame")
         actions.pack(fill="x", pady=(0, 10))
-        self.load_model_button = ttk.Button(actions, text="Load Model Folder", style="Load.TButton", command=self._select_model)
+        self.load_model_button = ttk.Button(actions, text="Load Model", style="Load.TButton", command=self._select_model)
         self.load_model_button.pack(fill="x")
         self.open_images_button = ttk.Button(actions, text="Open Images", style="Tool.TButton", command=self._select_images)
         self.open_images_button.pack(fill="x", pady=(6, 0))
@@ -322,18 +341,26 @@ class EchoSightApp(tk.Tk):
             ("Brightness", self.brightness, 0.5, 1.5),
             ("Contrast", self.contrast, 0.5, 1.5),
             ("Sharpness", self.sharpness, 0.5, 2.0),
+            ("Denoise strength", self.denoise_strength, 0.0, 5.0),
         ):
             row = ttk.Frame(parent, style="Panel.TFrame")
             row.pack(fill="x")
-            ttk.Label(row, text=label, style="PanelText.TLabel", width=10).pack(side="left")
-            ttk.Scale(row, variable=variable, from_=start, to=end, command=lambda _: self._refresh_analysis()).pack(side="left", fill="x", expand=True)
-        ttk.Checkbutton(parent, text="Denoise", variable=self.denoise, command=self._refresh_analysis, style="Panel.TCheckbutton").pack(anchor="w")
+            ttk.Label(row, text=label, style="PanelText.TLabel", width=17).pack(side="left")
+            value = ttk.Label(row, style="PanelText.TLabel", width=5, anchor="e")
+            value.pack(side="right")
+
+            def update(_: str | None = None, current=variable, output=value) -> None:
+                output.configure(text=f"{current.get():.1f}")
+                self._refresh_analysis()
+
+            ttk.Scale(row, variable=variable, from_=start, to=end, command=update).pack(side="left", fill="x", expand=True, padx=(4, 8))
+            update()
 
     def _toggle_preprocess_popup(self) -> None:
         if self.preprocess_popup is not None and self.preprocess_popup.winfo_exists():
-            self.preprocess_popup.destroy()
-            self.preprocess_popup = None
+            self._close_preprocess_popup()
             return
+        self._load_preprocess_profile(self.current_analysis_index)
         popup = tk.Toplevel(self)
         self.preprocess_popup = popup
         popup.overrideredirect(True)
@@ -343,8 +370,9 @@ class EchoSightApp(tk.Tk):
         header = ttk.Frame(panel, style="Panel.TFrame")
         header.pack(fill="x", pady=(0, 8))
         ttk.Label(header, text="IMAGE ADJUSTMENTS", style="PanelTitle.TLabel").pack(side="left")
-        ttk.Button(header, text="Close", style="Tool.TButton", command=self._close_preprocess_popup).pack(side="right")
         self._build_preprocess_controls(panel)
+        ttk.Button(panel, text="Apply to current frame", style="Accent.TButton", command=self._apply_preprocessing_current).pack(fill="x", pady=(10, 0))
+        ttk.Button(panel, text="Apply to all frames", style="Tool.TButton", command=self._apply_preprocessing_all).pack(fill="x", pady=(6, 0))
         ttk.Button(panel, text="Reset", style="Tool.TButton", command=self._reset_preprocessing).pack(fill="x", pady=(10, 0))
         popup.update_idletasks()
         x = self.preprocess_button.winfo_rootx() + self.preprocess_button.winfo_width() - popup.winfo_reqwidth()
@@ -355,31 +383,46 @@ class EchoSightApp(tk.Tk):
         if self.preprocess_popup is not None and self.preprocess_popup.winfo_exists():
             self.preprocess_popup.destroy()
         self.preprocess_popup = None
+        self._load_preprocess_profile(self.current_analysis_index)
+        self._refresh_analysis()
+
+    def _apply_preprocessing_current(self) -> None:
+        if self.current_analysis_index is None:
+            return
+        self.preprocess_profiles[self.current_analysis_index] = self._preprocess_draft()
+        self._refresh_analysis()
+        self._refresh_result()
+
+    def _apply_preprocessing_all(self) -> None:
+        settings = self._preprocess_draft()
+        self.preprocess_profiles = {index: settings for index in range(len(self.frames))}
+        self._refresh_analysis()
+        self._refresh_result()
 
     def _reset_preprocessing(self) -> None:
         self.brightness.set(1.0)
         self.contrast.set(1.0)
         self.sharpness.set(1.0)
-        self.denoise.set(False)
+        self.denoise_strength.set(0.0)
         self._refresh_analysis()
 
     def _build_results_tab(self) -> None:
         panes = ttk.Panedwindow(self.results_tab, orient="horizontal")
         panes.pack(fill="both", expand=True)
-        result_list_panel = ttk.Frame(panes, style="Panel.TFrame", padding=12, width=430)
+        result_list_panel = ttk.Frame(panes, style="Panel.TFrame", padding=12)
         result_viewer = ttk.Frame(panes, style="Panel.TFrame")
-        detail_panel = ttk.Frame(panes, style="Panel.TFrame", padding=12, width=330)
-        panes.add(result_list_panel, weight=2)
-        panes.add(result_viewer, weight=4)
-        panes.add(detail_panel, weight=2)
+        detail_panel = ttk.Frame(panes, style="Panel.TFrame", padding=12)
+        panes.add(result_list_panel, weight=0)
+        panes.add(result_viewer, weight=1)
+        panes.add(detail_panel, weight=0)
 
         ttk.Label(result_list_panel, text="RESULT FRAMES", style="PanelTitle.TLabel").pack(anchor="w", pady=(0, 8))
         columns = ("frame", "type", "annotations", "confidence")
-        self.result_list = ttk.Treeview(result_list_panel, columns=columns, show="headings", style="Results.Treeview", selectmode="browse")
-        self.result_list.column("frame", width=185, minwidth=145, anchor="w")
-        self.result_list.column("type", width=75, minwidth=65, anchor="w")
-        self.result_list.column("annotations", width=90, minwidth=80, anchor="center")
-        self.result_list.column("confidence", width=135, minwidth=125, anchor="e")
+        self.result_list = ttk.Treeview(result_list_panel, columns=columns, show="headings", style="Results.Treeview", selectmode="extended")
+        self.result_list.column("frame", width=135, minwidth=90, anchor="w", stretch=True)
+        self.result_list.column("type", width=65, minwidth=55, anchor="w", stretch=False)
+        self.result_list.column("annotations", width=82, minwidth=70, anchor="center", stretch=False)
+        self.result_list.column("confidence", width=120, minwidth=100, anchor="e", stretch=False)
         for column, label in (("frame", "Frame"), ("type", "Type"), ("annotations", "Annotations"), ("confidence", "Highest confidence")):
             self.result_list.heading(column, text=label, command=lambda key=column: self._sort_results(key))
         result_vertical = ttk.Scrollbar(result_list_panel, orient="vertical", command=self.result_list.yview)
@@ -391,13 +434,21 @@ class EchoSightApp(tk.Tk):
         self.result_list.bind("<<TreeviewSelect>>", self._show_result_selection)
         self.results_canvas = FitImageCanvas(result_viewer)
         self.results_canvas.pack(fill="both", expand=True)
+        self.annotation_style_button = ttk.Button(
+            result_viewer,
+            text="\U0001f3a8",
+            width=3,
+            style="Tool.TButton",
+            command=self._toggle_annotation_popup,
+        )
+        self.annotation_style_button.place(relx=1.0, rely=1.0, x=-18, y=-18, anchor="se")
 
         ttk.Label(detail_panel, text="RESULT DETAILS", style="PanelTitle.TLabel").pack(anchor="w")
         self.result_text = tk.StringVar(value="Run inference in Analysis to populate results.")
         ttk.Label(detail_panel, textvariable=self.result_text, style="PanelText.TLabel", wraplength=295, justify="left").pack(anchor="w", pady=(8, 12))
         ttk.Label(detail_panel, text="OVERLAYS", style="PanelTitle.TLabel").pack(anchor="w")
         for text, variable in (("Bounding boxes", self.show_boxes), ("Labels", self.show_labels), ("Instance masks", self.show_masks), ("Anomaly heatmap", self.show_heatmap)):
-            ttk.Checkbutton(detail_panel, text=text, variable=variable, command=self._refresh_result, style="Panel.TCheckbutton").pack(anchor="w")
+            ttk.Checkbutton(detail_panel, text=text, variable=variable, command=self._refresh_annotation_views, style="Panel.TCheckbutton").pack(anchor="w")
         self.export_button = ttk.Button(
             detail_panel,
             text="Save All",
@@ -414,6 +465,23 @@ class EchoSightApp(tk.Tk):
             command=lambda: self._select_export_destination(current_only=True),
         )
         self.export_current_button.pack(fill="x", pady=(6, 0))
+        ttk.Label(detail_panel, text="MODEL RETRAINING", style="PanelTitle.TLabel").pack(anchor="w", pady=(14, 5))
+        self.mark_false_hits_button = ttk.Button(
+            detail_panel,
+            text="Mark for Training (False Hits)",
+            style="Danger.TButton",
+            state="disabled",
+            command=lambda: self._mark_for_training("False_Hits"),
+        )
+        self.mark_false_hits_button.pack(fill="x")
+        self.mark_misses_button = ttk.Button(
+            detail_panel,
+            text="Mark for Training (Misses)",
+            style="Tool.TButton",
+            state="disabled",
+            command=lambda: self._mark_for_training("Misses"),
+        )
+        self.mark_misses_button.pack(fill="x", pady=(6, 0))
         ttk.Label(detail_panel, text="ANNOTATIONS", style="PanelTitle.TLabel").pack(anchor="w", pady=(14, 5))
         annotation_area = ttk.Frame(detail_panel, style="Panel.TFrame")
         annotation_area.pack(fill="both", expand=True)
@@ -426,6 +494,137 @@ class EchoSightApp(tk.Tk):
         scrollbar.pack(side="right", fill="y")
         self.annotation_container.bind("<Configure>", lambda _: self.annotation_canvas.configure(scrollregion=self.annotation_canvas.bbox("all")))
         self.annotation_canvas.bind("<Configure>", lambda event: self.annotation_canvas.itemconfigure(self.annotation_window, width=event.width))
+
+    def _toggle_annotation_popup(self) -> None:
+        if self.annotation_popup is not None and self.annotation_popup.winfo_exists():
+            self._close_annotation_popup()
+            return
+        self._load_annotation_profile(self.current_result_index)
+        popup = tk.Toplevel(self)
+        self.annotation_popup = popup
+        popup.overrideredirect(True)
+        popup.configure(background="#45484c")
+        panel = ttk.Frame(popup, style="Panel.TFrame", padding=14)
+        panel.pack(fill="both", expand=True, padx=1, pady=1)
+        header = ttk.Frame(panel, style="Panel.TFrame")
+        header.pack(fill="x", pady=(0, 8))
+        ttk.Label(header, text="ANNOTATION CONTROL", style="PanelTitle.TLabel").pack(side="left")
+
+        self._build_annotation_scale(panel, "Font size", self.annotation_font_size, 6, 32, "pt")
+        self._build_annotation_scale(panel, "Line thickness", self.annotation_thickness, 1, 12, "px")
+        self._build_annotation_scale(panel, "Annotation transparency", self.annotation_transparency, 0, 1, "%")
+        self._build_annotation_scale(panel, "Label transparency", self.label_transparency, 0, 1, "%")
+
+        color_row = ttk.Frame(panel, style="Panel.TFrame")
+        color_row.pack(fill="x", pady=(7, 0))
+        ttk.Label(color_row, text="Annotation color", style="PanelText.TLabel", width=21).pack(side="left")
+        color = self._annotation_color_hex()
+        self.annotation_color_button = tk.Button(
+            color_row,
+            text=color or "Current palette",
+            command=self._choose_annotation_color,
+            background=color or "#333333",
+            foreground="#ffffff",
+            activebackground=color or "#414141",
+            activeforeground="#ffffff",
+            borderwidth=0,
+            padx=8,
+            pady=4,
+        )
+        self.annotation_color_button.pack(side="right")
+        ttk.Button(panel, text="Apply to current frame", style="Accent.TButton", command=self._apply_annotation_current).pack(fill="x", pady=(10, 0))
+        ttk.Button(panel, text="Apply to all frames", style="Tool.TButton", command=self._apply_annotation_all).pack(fill="x", pady=(6, 0))
+        ttk.Button(panel, text="Reset", style="Tool.TButton", command=self._reset_annotation_style).pack(fill="x", pady=(10, 0))
+        popup.update_idletasks()
+        x = self.annotation_style_button.winfo_rootx() + self.annotation_style_button.winfo_width() - popup.winfo_reqwidth()
+        y = self.annotation_style_button.winfo_rooty() - popup.winfo_reqheight() - 8
+        popup.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+    def _build_annotation_scale(
+        self,
+        parent: ttk.Frame,
+        label: str,
+        variable: tk.DoubleVar,
+        start: float,
+        end: float,
+        unit: str,
+    ) -> None:
+        row = ttk.Frame(parent, style="Panel.TFrame")
+        row.pack(fill="x", pady=2)
+        ttk.Label(row, text=label, style="PanelText.TLabel", width=21).pack(side="left")
+        value = ttk.Label(row, style="PanelText.TLabel", width=6, anchor="e")
+        value.pack(side="right")
+
+        def update(_: str | None = None) -> None:
+            current = variable.get()
+            value.configure(text=f"{round(current * 100)}%" if unit == "%" else f"{round(current)} {unit}")
+            self._refresh_result()
+
+        ttk.Scale(row, variable=variable, from_=start, to=end, command=update).pack(side="left", fill="x", expand=True, padx=(4, 8))
+        update()
+
+    def _choose_annotation_color(self) -> None:
+        initial = self._annotation_color_hex() or "#25b9a7"
+        self.choosing_annotation_color = True
+        try:
+            rgb, hex_color = colorchooser.askcolor(color=initial, parent=self.annotation_popup or self, title="Choose annotation color")
+        finally:
+            self.choosing_annotation_color = False
+        if rgb is None or hex_color is None:
+            return
+        self.annotation_color = tuple(round(channel) for channel in rgb)
+        self.annotation_color_button.configure(background=hex_color, activebackground=hex_color, text=hex_color)
+        self._refresh_result()
+
+    def _annotation_color_hex(self) -> str | None:
+        if self.annotation_color is None:
+            return None
+        return "#{:02x}{:02x}{:02x}".format(*self.annotation_color)
+
+    def _close_annotation_popup(self) -> None:
+        if self.annotation_popup is not None and self.annotation_popup.winfo_exists():
+            self.annotation_popup.destroy()
+        self.annotation_popup = None
+        self._load_annotation_profile(self.current_result_index)
+        self._refresh_result()
+
+    def _apply_annotation_current(self) -> None:
+        if self.current_result_index is None:
+            return
+        self.annotation_profiles[self.current_result_index] = self._annotation_draft()
+        self._refresh_result()
+
+    def _apply_annotation_all(self) -> None:
+        options = self._annotation_draft()
+        self.annotation_profiles = {index: options for index in range(len(self.frames))}
+        self._refresh_result()
+
+    def _reset_annotation_style(self) -> None:
+        self.annotation_font_size.set(10.0)
+        self.annotation_thickness.set(3.0)
+        self.annotation_transparency.set(0.0)
+        self.label_transparency.set(0.0)
+        self.annotation_color = None
+        self._refresh_result()
+
+    def _dismiss_popups(self, event: tk.Event) -> None:
+        if self.choosing_annotation_color:
+            return
+        for popup, close in (
+            (self.preprocess_popup, self._close_preprocess_popup),
+            (self.annotation_popup, self._close_annotation_popup),
+        ):
+            if popup is not None and popup.winfo_exists() and not self._is_descendant(event.widget, popup):
+                close()
+
+    @staticmethod
+    def _is_descendant(widget: tk.Misc, parent: tk.Misc) -> bool:
+        current: tk.Misc | None = widget
+        while current is not None:
+            if current == parent:
+                return True
+            current = current.master
+        return False
 
     @staticmethod
     def _new_listbox(parent: tk.Misc) -> tk.Listbox:
@@ -590,6 +789,8 @@ class EchoSightApp(tk.Tk):
         self.results.clear()
         self.inference_failures.clear()
         self.hidden_annotations.clear()
+        self.preprocess_profiles.clear()
+        self.annotation_profiles.clear()
         self.image_list.delete(0, tk.END)
         self._clear_results_ui()
         for frame in self.frames:
@@ -614,27 +815,49 @@ class EchoSightApp(tk.Tk):
         if index != self.current_analysis_index:
             self.analysis_canvas.reset_view()
         self.current_analysis_index = index
+        if self.preprocess_popup is None:
+            self._load_preprocess_profile(index)
         self._refresh_analysis()
         frame = self.frames[index]
         self.status_text.set(f"{frame.display_name} | {frame.image.width} x {frame.image.height}")
 
     @staticmethod
-    def _process_image(image: Image.Image, settings: tuple[float, float, float, bool]) -> Image.Image:
-        brightness, contrast, sharpness, denoise = settings
+    def _process_image(image: Image.Image, settings: tuple[float, float, float, float]) -> Image.Image:
+        brightness, contrast, sharpness, denoise_strength = settings
         processed = ImageEnhance.Brightness(image).enhance(brightness)
         processed = ImageEnhance.Contrast(processed).enhance(contrast)
         processed = ImageEnhance.Sharpness(processed).enhance(sharpness)
-        return processed.filter(ImageFilter.MedianFilter(3)) if denoise else processed
+        return processed.filter(ImageFilter.GaussianBlur(denoise_strength)) if denoise_strength > 0 else processed
 
-    def _preprocess_settings(self) -> tuple[float, float, float, bool]:
-        return self.brightness.get(), self.contrast.get(), self.sharpness.get(), self.denoise.get()
+    @staticmethod
+    def _default_preprocess_settings() -> tuple[float, float, float, float]:
+        return 1.0, 1.0, 1.0, 0.0
 
-    def _processed_image(self, image: Image.Image) -> Image.Image:
-        return self._process_image(image, self._preprocess_settings())
+    def _preprocess_draft(self) -> tuple[float, float, float, float]:
+        return self.brightness.get(), self.contrast.get(), self.sharpness.get(), self.denoise_strength.get()
+
+    def _preprocess_settings(self, index: int | None = None, live: bool = False) -> tuple[float, float, float, float]:
+        if live and index == self.current_analysis_index and self.preprocess_popup is not None:
+            return self._preprocess_draft()
+        if index is None:
+            index = self.current_analysis_index
+        return self.preprocess_profiles.get(index, self._default_preprocess_settings())
+
+    def _load_preprocess_profile(self, index: int | None) -> None:
+        settings = self.preprocess_profiles.get(index, self._default_preprocess_settings())
+        self.brightness.set(settings[0])
+        self.contrast.set(settings[1])
+        self.sharpness.set(settings[2])
+        self.denoise_strength.set(settings[3])
+
+    def _processed_image(self, image: Image.Image, index: int | None = None, live: bool = False) -> Image.Image:
+        return self._process_image(image, self._preprocess_settings(index, live))
 
     def _refresh_analysis(self) -> None:
         if self.current_analysis_index is not None and self.current_analysis_index < len(self.frames):
-            self.analysis_canvas.set_image(self._processed_image(self.frames[self.current_analysis_index].image))
+            index = self.current_analysis_index
+            image = self._processed_image(self.frames[index].image, index, live=True)
+            self.analysis_canvas.set_image(image)
 
     def _run_current(self) -> None:
         if self.current_analysis_index is not None:
@@ -662,7 +885,7 @@ class EchoSightApp(tk.Tk):
         self._update_run_state()
         self._set_activity("Running inference", True)
         self._log(f"Inference started | {len(frames)} frame(s)")
-        settings = self._preprocess_settings()
+        settings = {index: self._preprocess_settings(index) for index, _frame in frames}
         for index, _frame in frames:
             self.inference_failures.pop(index, None)
         threading.Thread(target=self._inference_worker, args=(frames, settings), daemon=True).start()
@@ -671,7 +894,7 @@ class EchoSightApp(tk.Tk):
     def _inference_worker(
         self,
         frames: list[tuple[int, LoadedFrame]],
-        settings: tuple[float, float, float, bool],
+        settings: dict[int, tuple[float, float, float, float]],
     ) -> None:
         completed = 0
         failed = 0
@@ -682,7 +905,7 @@ class EchoSightApp(tk.Tk):
                     return
                 self.inference_events.put(("progress", (position, len(frames), frame.display_name)))
                 try:
-                    image = self._process_image(frame.image, settings)
+                    image = self._process_image(frame.image, settings[index])
                     result = self.inference_engine.infer(image, frame.source)
                     completed += 1
                     self.inference_events.put(("result", (position, len(frames), index, result)))
@@ -786,6 +1009,7 @@ class EchoSightApp(tk.Tk):
         return not self.cancel_inference.is_set()
 
     def _refresh_result_list(self) -> None:
+        selected = set(self.result_list.selection())
         ordered = self._ordered_result_indexes()
         self.result_list.delete(*self.result_list.get_children())
         for index in ordered:
@@ -803,15 +1027,21 @@ class EchoSightApp(tk.Tk):
                 ),
             )
         self._update_result_headings()
-        if self.current_result_index in self.results:
+        restored = [item for item in selected if int(item) in self.results]
+        if restored:
+            self.result_list.selection_set(restored)
+        elif self.current_result_index in self.results:
             self.result_list.selection_set(str(self.current_result_index))
+        self._update_training_button_state()
 
     def _show_result_selection(self, _event: object) -> None:
         selection = self.result_list.selection()
         if selection:
-            index = int(selection[0])
+            focused = self.result_list.focus()
+            index = int(focused) if focused in selection else int(selection[0])
             if index != self.current_result_index:
                 self._select_result_frame(index)
+        self._update_training_button_state()
 
     @staticmethod
     def _result_metrics(result: InferenceResult) -> tuple[int, float | None]:
@@ -842,8 +1072,6 @@ class EchoSightApp(tk.Tk):
             self.result_sort_column = column
             self.result_sort_descending = False
         self._refresh_result_list()
-        if self.current_result_index in self.results:
-            self.result_list.selection_set(str(self.current_result_index))
 
     def _update_result_headings(self) -> None:
         labels = {"frame": "Frame", "type": "Type", "annotations": "Annotations", "confidence": "Highest confidence"}
@@ -857,8 +1085,16 @@ class EchoSightApp(tk.Tk):
         if index != self.current_result_index:
             self.results_canvas.reset_view()
         self.current_result_index = index
-        if index in self.results:
+        if self.annotation_popup is None:
+            self._load_annotation_profile(index)
+        if index < len(self.frames):
+            self.image_list.selection_clear(0, tk.END)
+            self.image_list.selection_set(index)
+            self.image_list.activate(index)
+            self._select_analysis_frame(index)
+        if index in self.results and str(index) not in self.result_list.selection():
             self.result_list.selection_set(str(index))
+        if index in self.results:
             self.result_list.see(str(index))
         self._refresh_result()
         self._show_result_details(self.results[index])
@@ -868,15 +1104,51 @@ class EchoSightApp(tk.Tk):
             return
         index = self.current_result_index
         rendered = render_result(
-            self._processed_image(self.frames[index].image),
+            self._processed_image(self.frames[index].image, index),
             self.results[index],
-            self._render_options(),
+            self._render_options(index, live=True),
             self.hidden_annotations.get(index, set()),
         )
         self.results_canvas.set_image(rendered)
 
-    def _render_options(self) -> RenderOptions:
-        return RenderOptions(self.show_boxes.get(), self.show_labels.get(), self.show_masks.get(), self.show_heatmap.get())
+    def _refresh_annotation_views(self) -> None:
+        self._refresh_result()
+
+    def _annotation_draft(self) -> RenderOptions:
+        return RenderOptions(
+            show_boxes=self.show_boxes.get(),
+            show_labels=self.show_labels.get(),
+            show_masks=self.show_masks.get(),
+            show_heatmap=self.show_heatmap.get(),
+            font_family="Calibri",
+            font_size=round(self.annotation_font_size.get()),
+            annotation_color=self.annotation_color,
+            annotation_thickness=round(self.annotation_thickness.get()),
+            annotation_opacity=1.0 - self.annotation_transparency.get(),
+            label_opacity=1.0 - self.label_transparency.get(),
+        )
+
+    def _render_options(self, index: int | None = None, live: bool = False) -> RenderOptions:
+        if index is None:
+            index = self.current_result_index
+        if live and self.annotation_popup is not None and index == self.current_result_index:
+            return self._annotation_draft()
+        applied = self.annotation_profiles.get(index, RenderOptions())
+        return replace(
+            applied,
+            show_boxes=self.show_boxes.get(),
+            show_labels=self.show_labels.get(),
+            show_masks=self.show_masks.get(),
+            show_heatmap=self.show_heatmap.get(),
+        )
+
+    def _load_annotation_profile(self, index: int | None) -> None:
+        options = self.annotation_profiles.get(index, RenderOptions())
+        self.annotation_font_size.set(options.font_size)
+        self.annotation_thickness.set(options.annotation_thickness)
+        self.annotation_transparency.set(1.0 - options.annotation_opacity)
+        self.label_transparency.set(1.0 - options.label_opacity)
+        self.annotation_color = options.annotation_color
 
     def _select_export_destination(self, current_only: bool = False) -> None:
         if self.model_info is None or (not self.results and not self.inference_failures):
@@ -886,12 +1158,23 @@ class EchoSightApp(tk.Tk):
         selected = filedialog.askdirectory(title="Select folder for exported run", mustexist=True)
         if not selected:
             return
-        settings = self._preprocess_settings()
+        current_index = self.current_result_index if current_only else self.current_analysis_index
+        settings = self._preprocess_settings(current_index)
+        settings_by_frame = {index: self._preprocess_settings(index) for index in range(len(self.frames))}
         preprocessing = {
             "brightness": settings[0],
             "contrast": settings[1],
             "sharpness": settings[2],
-            "denoise": settings[3],
+            "denoise_strength": settings[3],
+            "by_frame": {
+                str(index): {
+                    "brightness": values[0],
+                    "contrast": values[1],
+                    "sharpness": values[2],
+                    "denoise_strength": values[3],
+                }
+                for index, values in settings_by_frame.items()
+            },
         }
         self.export_running = True
         self.resume_activity.set()
@@ -911,8 +1194,8 @@ class EchoSightApp(tk.Tk):
                 self.model_info,
                 self.model_parent,
                 preprocessing,
-                settings,
-                self._render_options(),
+                settings_by_frame,
+                {index: self._render_options(index) for index in range(len(self.frames))},
                 {index: set(hidden) for index, hidden in self.hidden_annotations.items()},
                 selected_failures,
             ),
@@ -925,6 +1208,48 @@ class EchoSightApp(tk.Tk):
             return {self.current_result_index: self.results[self.current_result_index]}, {}
         return dict(self.results), dict(self.inference_failures)
 
+    def _mark_for_training(self, category: str) -> None:
+        indexes = self._selected_result_indexes()
+        if not indexes:
+            messagebox.showinfo("Mark for Training", "Select one or more result frames first.")
+            return
+        selected = filedialog.askdirectory(title="Select folder for training images", mustexist=True)
+        if not selected:
+            return
+        if self.model_parent is not None:
+            model_folder_name = self.model_parent.name
+        elif self.model_info is not None:
+            model_folder_name = self.model_info.path.parent.name
+        else:
+            model_folder_name = "Model"
+        try:
+            report = export_training_frames(
+                Path(selected),
+                [(index, self.frames[index]) for index in indexes],
+                category,
+                model_folder_name,
+            )
+        except (OSError, ValueError) as error:
+            self._log(f"ERROR | Training image export failed: {error}")
+            messagebox.showerror("Mark for Training", str(error))
+            return
+        label = "False Hits" if category == "False_Hits" else "Misses"
+        self.status_text.set(f"Marked {len(report.images)} frame(s) for training: {label}")
+        self._log(f"Marked for training | {label} | {len(report.images)} frame(s) | {report.directory}")
+        messagebox.showinfo(
+            "Training images saved",
+            f"Saved {len(report.images)} selected frame(s).\n\n{report.directory}",
+        )
+
+    def _selected_result_indexes(self) -> list[int]:
+        return sorted(int(item) for item in self.result_list.selection() if int(item) in self.results)
+
+    def _update_training_button_state(self) -> None:
+        enabled = bool(self.result_list.selection()) and not self.inference_running and not self.export_running
+        state = "normal" if enabled else "disabled"
+        self.mark_false_hits_button.configure(state=state)
+        self.mark_misses_button.configure(state=state)
+
     def _export_worker(
         self,
         destination: Path,
@@ -933,8 +1258,8 @@ class EchoSightApp(tk.Tk):
         model_info: ModelInfo,
         model_parent: Path | None,
         preprocessing: dict[str, object],
-        settings: tuple[float, float, float, bool],
-        render_options: RenderOptions,
+        settings: dict[int, tuple[float, float, float, float]],
+        render_options: dict[int, RenderOptions],
         hidden_annotations: dict[int, set[int]],
         failures: dict[int, str],
     ) -> None:
@@ -950,10 +1275,10 @@ class EchoSightApp(tk.Tk):
                 model_info=model_info,
                 model_parent=model_parent,
                 preprocessing=preprocessing,
-                render_options=render_options,
+                render_options_by_frame=render_options,
                 hidden_annotations=hidden_annotations,
                 failures=failures,
-                image_transform=lambda image: self._process_image(image, settings),
+                frame_image_transform=lambda image, index: self._process_image(image, settings[index]),
                 progress=report_progress,
             )
             self.export_events.put(("complete", report))
@@ -1038,6 +1363,7 @@ class EchoSightApp(tk.Tk):
         for child in self.annotation_container.winfo_children():
             child.destroy()
         self.current_result_index = None
+        self._update_training_button_state()
 
     def _update_run_state(self) -> None:
         state = "normal" if self.inference_engine and self.frames and not self.inference_running and not self.export_running else "disabled"
@@ -1048,6 +1374,7 @@ class EchoSightApp(tk.Tk):
         self.export_button.configure(state=export_state)
         current_export_state = "normal" if self.current_result_index in self.results and export_state == "normal" else "disabled"
         self.export_current_button.configure(state=current_export_state)
+        self._update_training_button_state()
 
     def _set_activity(self, text: str, active: bool) -> None:
         self.activity_text.set(text)
@@ -1080,6 +1407,7 @@ class EchoSightApp(tk.Tk):
         self.cancel_inference.set()
         self.resume_activity.set()
         self._close_preprocess_popup()
+        self._close_annotation_popup()
         self.destroy()
 
 

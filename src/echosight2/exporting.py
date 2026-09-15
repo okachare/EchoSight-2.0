@@ -5,10 +5,11 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from PIL import Image
 
@@ -36,10 +37,12 @@ def export_run(
     model_parent: Path | None,
     preprocessing: dict[str, Any],
     render_options: RenderOptions | None = None,
+    render_options_by_frame: dict[int, RenderOptions] | None = None,
     hidden_annotations: dict[int, set[int]] | None = None,
     failures: dict[int, str] | None = None,
     exported_at: datetime | None = None,
     image_transform: Callable[[Image.Image], Image.Image] | None = None,
+    frame_image_transform: Callable[[Image.Image, int], Image.Image] | None = None,
     progress: Callable[[int, int, str], None] | None = None,
 ) -> ExportReport:
     """Write annotated images, flat CSV results, and a reproducible JSON manifest."""
@@ -53,6 +56,7 @@ def export_run(
     image_directory = run_directory / "annotated"
     image_directory.mkdir(parents=True)
     options = render_options or RenderOptions()
+    frame_options = render_options_by_frame or {}
     hidden = hidden_annotations or {}
     failed = failures or {}
 
@@ -78,8 +82,11 @@ def export_run(
         durations.append(result.duration_ms)
         output_name = _annotated_name(frame_index, frame)
         output_path = image_directory / output_name
-        source_image = image_transform(frame.image) if image_transform is not None else frame.image
-        rendered = render_result(source_image, result, options, hidden.get(frame_index, set()))
+        if frame_image_transform is not None:
+            source_image = frame_image_transform(frame.image, frame_index)
+        else:
+            source_image = image_transform(frame.image) if image_transform is not None else frame.image
+        rendered = render_result(source_image, result, frame_options.get(frame_index, options), hidden.get(frame_index, set()))
         rendered.save(output_path, format="PNG")
         annotated_images.append(output_path)
         frame_records.append(_result_record(frame_index, frame, source_hash, result, output_path.relative_to(run_directory)))
@@ -97,6 +104,7 @@ def export_run(
             "user_preprocessing": preprocessing,
             "model_preprocessing": _model_preprocessing(model_info),
             "render_options": asdict(options),
+            "render_options_by_frame": {str(index): asdict(value) for index, value in sorted(frame_options.items())},
         },
         "summary": _summary(frames, results, failed, durations),
         "frames": frame_records,

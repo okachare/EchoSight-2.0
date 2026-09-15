@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased] - 2026-09-15
+
+### Added
+- Per-frame or all-frame Image Adjustments for brightness, contrast, sharpness, and continuous denoise strength.
+- Per-frame or all-frame Annotation Control for Calibri label size, annotation color, line thickness, annotation transparency, and label transparency.
+- Multi-selection Results actions for exporting original frames as model-specific False Hits or Misses retraining sets without overwriting existing files.
+- CSAM Helper and EchoSight operator-training guidance covering the complete data flow, current controls, retraining review, confidence behavior, and troubleshooting.
+
+### Changed
+- Renamed **Load Model Folder** to **Load Model**.
+- Kept Analysis previews unannotated and restricted model overlays to Results.
+- Made image and annotation popup changes live previews that persist only when applied to the current frame or all frames.
+- Gave the analyzed-image panel all surplus Results-tab width while the Results table and detail panel autosize to their contents.
+- Reduced the initial Results table column widths while preserving manual resizing and horizontal scrolling.
+- Updated exports and manifests to retain each frame's applied preprocessing and annotation-rendering settings.
+
+### Fixed
+- Preserved multi-row Results selections during list refreshes so batch False Hit and Miss exports remain reliable.
+- Kept original, unannotated image pixels and TIFF-safe frame names in retraining exports.
+
+### Validated
+- All 43 automated tests pass, including desktop workflow, rendering pixels, per-frame exports, and retraining safeguards.
+- The Results image panel receives the dominant width in a real 3840-pixel Tk layout check.
+
 ## [2.0.0] - 2026-09-14
 
 ### Phase 4 - Complete - 2026-09-14

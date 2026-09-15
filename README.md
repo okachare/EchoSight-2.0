@@ -10,7 +10,7 @@ Phase 4 is complete as of 2026-09-14. EchoSight 2.0 provides parent-folder model
 
 Multi-frame TIFF pages are expanded into independent in-memory frames. Each frame can be selected and inferred individually, or all frames can be processed with Run All. No duplicate TIFF files are written to disk.
 
-Current validation: all 28 automated tests pass in the full development workspace. Phase 4 acceptance processed all 66 TIFF pages with the real `NVL_S28C_Detect_09092026_V17` package, producing 93 detections with no failed frames. `Test_Run_Instance_Segmentation` follows its embedded anomaly contract and also completed inference and export successfully.
+Current validation: all 43 automated tests pass in the full development workspace. Phase 4 acceptance processed all 66 TIFF pages with the real `NVL_S28C_Detect_09092026_V17` package, producing 93 detections with no failed frames. `Test_Run_Instance_Segmentation` follows its embedded anomaly contract and also completed inference and export successfully.
 
 ## Shared Network Setup
 
@@ -54,8 +54,10 @@ Select the trained model's parent folder. EchoSight recursively finds the deploy
 - Calibrated anomaly heatmaps and scores
 - Global overlay visibility controls
 - Per-frame annotation visibility controls
+- Per-frame or all-frame Annotation Control for Calibri label size, annotation color, line thickness, and independent annotation/label transparency
+- Multi-select Results actions that save original frames as False Hits or Misses for model retraining
 - Mouse-wheel zoom, drag-to-pan, and double-click fit reset in both previews
-- Live brightness, contrast, sharpness, and denoising controls in the Analysis preview
+- Per-frame or all-frame brightness, contrast, sharpness, and denoise-strength controls with live Analysis preview
 - Sortable frame, task, annotation-count, and highest-confidence results
 
 Results are generated from the embedded model task contract. A package whose name says instance segmentation but whose model metadata says anomaly will produce anomaly output.

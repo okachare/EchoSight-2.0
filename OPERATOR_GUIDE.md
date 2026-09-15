@@ -17,7 +17,7 @@ Double-click `Launch_EchoSight.bat` in the shared folder. Run `SETUP.ps1` again 
 
 ## Inspect Images
 
-1. Select **Load Model Folder** and choose the trained model's parent folder.
+1. Select **Load Model** and choose the trained model's parent folder.
 2. Confirm the task, labels, thresholds, and preprocessing in **Model Information**.
 3. Select **Open Images** and choose one or more supported images or TIFF files.
 4. Use **Run All** for the complete list, **Run Selected** for highlighted frames, or **Run Current** for the active frame.
@@ -28,9 +28,21 @@ Supported inputs are PNG, JPEG, BMP, WebP, TIFF, and multi-frame TIFF.
 
 During a multi-frame run, select **Pause** to stop before the next frame. The control changes to **Resume** and continues from the same position when selected again. **Cancel** stops the remaining frames while retaining completed results.
 
-Use the mouse wheel over either image preview to zoom and drag the image to pan. Double-click the preview to restore fit-to-view. In Analysis, select the settings icon at the lower-right of the preview to adjust brightness, contrast, sharpness, and denoising. Changes appear immediately and are applied to subsequent inference and exports.
+Use the mouse wheel over either image preview to zoom and drag the image to pan. Double-click the preview to restore fit-to-view. In Analysis, select the settings icon at the lower-right of the preview to adjust brightness, contrast, sharpness, and exact denoise strength. Changes preview immediately. Select **Apply to current frame** or **Apply to all frames** to choose the processing scope used by inference and exports.
+
+In Results, select the color-wheel icon at the lower-right of the preview to open **Annotation Control**. Adjust label font size, annotation color, line thickness, annotation transparency, or label transparency. Changes preview live in Results only; Analysis always shows the unannotated image with its active image adjustments. Select **Apply to current frame** or **Apply to all frames** to choose the export scope. Select **Reset** to restore the standard per-class palette and default styling.
+
+Both popups close when you select their icon again or click elsewhere in EchoSight. Unapplied preview changes are discarded when the popup closes.
 
 The Results table can be sorted by frame, task type, annotation count, or highest confidence. Select a column header to alternate ascending and descending order.
+
+## Mark Frames for Retraining
+
+1. In Results, select one or more frames. Use Ctrl or Shift to select multiple rows.
+2. Select **Mark for Training (False Hits)** for incorrect model detections, or **Mark for Training (Misses)** for defects the model failed to detect.
+3. Choose the parent destination folder.
+
+EchoSight saves lossless, original unannotated PNG frames under `Mark_for_Training_False_Hits_(Model_folder_name)` or `Mark_for_Training_Misses_(Model_folder_name)`. Existing files are not overwritten. These folders can be reviewed and added to the model's next labeled training dataset.
 
 ## Export Run Evidence
 

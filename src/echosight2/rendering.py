@@ -17,6 +17,12 @@ class RenderOptions:
     show_masks: bool = True
     show_heatmap: bool = True
     overlay_opacity: float = 0.38
+    font_family: str = "Calibri"
+    font_size: int = 10
+    annotation_color: tuple[int, int, int] | None = None
+    annotation_thickness: int = 3
+    annotation_opacity: float = 1.0
+    label_opacity: float = 1.0
 
 
 COLORS = (
@@ -47,26 +53,46 @@ def render_result(
         rendered = _render_detection(rendered, detection, options)
 
     if options.show_labels and result.task_type is TaskType.ANOMALY and result.anomaly_score is not None and 0 not in hidden:
-        draw = ImageDraw.Draw(rendered)
-        _draw_label(draw, (8, 8), f"Anomaly {result.anomaly_score:.1%}", COLORS[3], rendered.size)
+        color = options.annotation_color or COLORS[3]
+        rendered = _draw_label(rendered, (8, 8), f"Anomaly {result.anomaly_score:.1%}", color, options)
 
     return rendered
 
 
 def _render_detection(image: Image.Image, detection: Detection, options: RenderOptions) -> Image.Image:
     rendered = image
-    color = COLORS[detection.label_id % len(COLORS)]
+    color = options.annotation_color or COLORS[detection.label_id % len(COLORS)]
     x1, y1, x2, y2 = _clamp_box(detection.box, rendered.size)
 
     if detection.mask is not None and options.show_masks and x2 > x1 and y2 > y1:
-        rendered = _blend_box_mask(rendered, detection.mask, (x1, y1, x2, y2), color, options.overlay_opacity)
+        rendered = _blend_box_mask(
+            rendered,
+            detection.mask,
+            (x1, y1, x2, y2),
+            color,
+            options.overlay_opacity * options.annotation_opacity,
+        )
 
-    draw = ImageDraw.Draw(rendered)
     if options.show_boxes:
-        draw.rectangle((x1, y1, x2, y2), outline=color, width=3)
+        rendered = _draw_box(rendered, (x1, y1, x2, y2), color, options.annotation_thickness, options.annotation_opacity)
     if options.show_labels:
-        _draw_label(draw, (x1, max(0, y1 - 23)), f"{detection.label} {detection.confidence:.1%}", color, rendered.size)
+        rendered = _draw_label(rendered, (x1, y1), f"{detection.label} {detection.confidence:.1%}", color, options, above=True)
     return rendered
+
+
+def _draw_box(
+    image: Image.Image,
+    box: tuple[int, int, int, int],
+    color: tuple[int, int, int],
+    thickness: int,
+    opacity: float,
+) -> Image.Image:
+    alpha = round(255 * float(np.clip(opacity, 0.0, 1.0)))
+    if alpha == 0:
+        return image
+    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    ImageDraw.Draw(overlay).rectangle(box, outline=(*color, alpha), width=max(1, int(thickness)))
+    return Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
 
 
 def _blend_box_mask(
@@ -124,17 +150,37 @@ def _clamp_box(box: tuple[float, float, float, float], size: tuple[int, int]) ->
 
 
 def _draw_label(
-    draw: ImageDraw.ImageDraw,
+    image: Image.Image,
     origin: tuple[int, int],
     text: str,
     color: tuple[int, int, int],
-    image_size: tuple[int, int],
-) -> None:
-    font = ImageFont.load_default()
-    left, top, right, bottom = draw.textbbox(origin, text, font=font)
+    options: RenderOptions,
+    above: bool = False,
+) -> Image.Image:
+    alpha = round(255 * float(np.clip(options.label_opacity, 0.0, 1.0)))
+    if alpha == 0:
+        return image
+    font = _load_label_font(options.font_family, options.font_size)
+    measure = ImageDraw.Draw(image)
+    left, top, right, bottom = measure.textbbox((0, 0), text, font=font)
     width = right - left + 8
     height = bottom - top + 8
-    x = min(max(0, origin[0]), max(0, image_size[0] - width))
-    y = min(max(0, origin[1]), max(0, image_size[1] - height))
-    draw.rectangle((x, y, x + width, y + height), fill=(12, 16, 20), outline=color)
-    draw.text((x + 4, y + 4), text, fill=(240, 245, 248), font=font)
+    x = min(max(0, origin[0]), max(0, image.size[0] - width))
+    requested_y = origin[1] - height if above else origin[1]
+    y = min(max(0, requested_y), max(0, image.size[1] - height))
+    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    draw.rectangle((x, y, x + width, y + height), fill=(12, 16, 20, alpha), outline=(*color, alpha))
+    draw.text((x + 4, y + 4), text, fill=(240, 245, 248, alpha), font=font)
+    return Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
+
+
+def _load_label_font(family: str, size: int) -> ImageFont.ImageFont | ImageFont.FreeTypeFont:
+    requested_size = max(1, int(size))
+    candidates = (f"{family}.ttf", "calibri.ttf", "arial.ttf")
+    for candidate in candidates:
+        try:
+            return ImageFont.truetype(candidate, requested_size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
