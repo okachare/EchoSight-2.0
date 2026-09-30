@@ -1,9 +1,11 @@
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
+
+from echosight2 import rendering
 from echosight2.inference import Detection, InferenceResult, TaskType
 from echosight2.rendering import RenderOptions, render_result
-from PIL import Image
 
 
 def _result(task_type: TaskType, **values: object) -> InferenceResult:
@@ -73,3 +75,29 @@ def test_zero_label_opacity_hides_label_without_hiding_detection() -> None:
     rendered = render_result(source, _result(TaskType.DETECTION, detections=(detection,)), options)
 
     assert np.array_equal(np.asarray(rendered), np.asarray(source))
+
+
+def test_chained_stages_use_distinct_default_box_colors() -> None:
+    source = Image.new("RGB", (100, 80), "black")
+    detection = Detection(0, "Anomaly", 0.91, (20, 20, 80, 70), stage="detection", roi_index=1)
+    classification = Detection(1, "Voids", 0.82, (20, 20, 80, 70), stage="classification", roi_index=1)
+
+    rendered = np.asarray(
+        render_result(
+            source,
+            _result(TaskType.DETECTION, detections=(detection, classification)),
+            RenderOptions(show_labels=False, annotation_thickness=3),
+        )
+    )
+
+    assert tuple(rendered[20, 20]) == (37, 185, 167)
+    assert tuple(rendered[23, 23]) == (83, 154, 255)
+
+
+def test_label_layout_avoids_overlapping_stage_labels() -> None:
+    occupied = [(20, 20, 90, 35)]
+
+    y = rendering._available_label_y(25, 22, 70, 15, 100, occupied)
+
+    candidate = (25, y, 95, y + 15)
+    assert not rendering._rectangles_overlap(candidate, occupied[0])

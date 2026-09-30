@@ -16,7 +16,14 @@ from PIL import Image, ImageEnhance, ImageFilter, ImageTk
 from . import __version__
 from .exporting import ExportReport, export_run
 from .frames import SUPPORTED_IMAGES, LoadedFrame, load_frames
-from .inference import InferenceEngine, InferenceResult, ModelInfo, ModelLoader
+from .inference import (
+    ChainedInferenceEngine,
+    InferenceEngine,
+    InferenceResult,
+    ModelInfo,
+    ModelLoader,
+    discover_detection_classification_chain,
+)
 from .rendering import RenderOptions, render_result
 from .runtime import log_directory
 from .training import export_training_frames
@@ -151,7 +158,8 @@ class EchoSightApp(tk.Tk):
         self.model_path: Path | None = None
         self.model_parent: Path | None = None
         self.model_info: ModelInfo | None = None
-        self.inference_engine: InferenceEngine | None = None
+        self.model_infos: tuple[ModelInfo, ...] = ()
+        self.inference_engine: InferenceEngine | ChainedInferenceEngine | None = None
         self.frames: list[LoadedFrame] = []
         self.results: dict[int, InferenceResult] = {}
         self.inference_failures: dict[int, str] = {}
@@ -646,38 +654,43 @@ class EchoSightApp(tk.Tk):
             self._log(f"ERROR | {message} | {parent}")
             messagebox.showerror("No model found", message)
             return
-        if len(models) > 1:
+        chain_paths = discover_detection_classification_chain(parent)
+        if len(models) > 1 and chain_paths is None:
             preview = "\n".join(f"- {path.relative_to(parent.resolve())}" for path in models[:6])
             message = f"This folder contains {len(models)} distinct models. Select the direct parent folder for one trained model.\n\n{preview}"
             self._log(f"ERROR | Multiple models found below {parent}: {len(models)}")
             messagebox.showerror("Multiple models found", message)
             return
-        path = models[0]
+        paths = chain_paths or (models[0],)
         self.model_path = None
         self.model_parent = parent
         self.model_info = None
+        self.model_infos = ()
         self.inference_engine = None
         self.results.clear()
         self.inference_failures.clear()
         self._clear_results_ui()
         self.model_name.set(parent.name)
         self._set_model_detail("Reading model metadata and preparing CPU compilation...")
-        self._set_activity(f"Reading model | {path.name}", True)
+        self._set_activity(f"Reading {'chained models' if len(paths) > 1 else 'model'}", True)
         self.load_model_button.configure(state="disabled")
         self._log(f"Model folder: {parent}")
-        self._log(f"Discovered model: {path.relative_to(parent.resolve())}")
-        threading.Thread(target=self._model_worker, args=(path, parent), daemon=True).start()
+        for path in paths:
+            self._log(f"Discovered model: {path.relative_to(parent.resolve())}")
+        threading.Thread(target=self._model_worker, args=(paths, parent), daemon=True).start()
         self.after(100, self._poll_model)
 
-    def _model_worker(self, path: Path, parent: Path) -> None:
+    def _model_worker(self, paths: tuple[Path, ...], parent: Path) -> None:
         try:
             loader = ModelLoader()
-            self.model_events.put(("progress", f"Inspecting metadata | {path.name}"))
-            info = loader.inspect(path, parent)
-            self.model_events.put(("progress", f"Compiling {info.model_type or info.task_type.value} for CPU"))
-            model = loader.core.read_model(info.path)
-            compiled = loader.core.compile_model(model, loader.device)
-            self.model_events.put(("loaded", (info, compiled)))
+            loaded = []
+            for position, path in enumerate(paths, start=1):
+                self.model_events.put(("progress", f"Inspecting stage {position}/{len(paths)} | {path.parent.parent.name}"))
+                info = loader.inspect(path, parent)
+                self.model_events.put(("progress", f"Compiling stage {position}/{len(paths)} | {info.model_type or info.task_type.value}"))
+                model = loader.core.read_model(info.path)
+                loaded.append((info, loader.core.compile_model(model, loader.device)))
+            self.model_events.put(("loaded", tuple(loaded)))
         except Exception as error:
             LOGGER.exception("Model loading failed")
             self.model_events.put(("error", error))
@@ -701,9 +714,12 @@ class EchoSightApp(tk.Tk):
             self._log(f"ERROR | Model loading failed: {payload}")
             messagebox.showerror("Model loading error", str(payload))
             return
-        self.model_info, compiled = payload
+        loaded = payload
+        self.model_infos = tuple(info for info, _compiled in loaded)
+        self.model_info = self.model_infos[0]
+        engines = tuple(InferenceEngine(info, compiled) for info, compiled in loaded)
         self.model_path = self.model_info.path
-        self.inference_engine = InferenceEngine(self.model_info, compiled)
+        self.inference_engine = ChainedInferenceEngine(engines[0], engines[1]) if len(engines) == 2 else engines[0]
         size = self.model_info.input_size
         input_description = f"{size[1]} x {size[0]}" if size else "Dynamic"
         outputs = "\n".join(f"  {item.name}: {item.shape}" for item in self.model_info.outputs)
@@ -711,8 +727,16 @@ class EchoSightApp(tk.Tk):
         metadata = dict(self.model_info.metadata)
         metrics = "\n".join(f"  {name}: {value:.2%}" for name, value in self.model_info.metrics) or "  Not available with this export"
         collaterals = ", ".join(self.model_info.collaterals) or "Embedded model metadata only"
+        pipeline = " -> ".join(info.task_type.value.replace("_", " ").title() for info in self.model_infos)
+        stage_details = "\n".join(
+            f"  {position}. {info.task_type.value.replace('_', ' ').title()}: {info.path.parent.parent.name} "
+            f"(threshold {info.confidence_threshold:.1%})"
+            for position, info in enumerate(self.model_infos, start=1)
+        )
         self._set_model_detail(
             f"Model: {metadata.get('model_name', self.model_info.path.stem)}\n"
+            f"Pipeline: {pipeline}\n"
+            f"Stages:\n{stage_details}\n"
             f"Model type: {self.model_info.model_type or 'Not embedded'}\n"
             f"Model version: {metadata.get('model_version', 'Not embedded')}\n"
             f"GetiTune version: {metadata.get('getitune_version', 'Not embedded')}\n"
@@ -818,6 +842,12 @@ class EchoSightApp(tk.Tk):
         if self.preprocess_popup is None:
             self._load_preprocess_profile(index)
         self._refresh_analysis()
+        frame = self.frames[index]
+        if frame.is_optimized:
+            self._log(
+                f"Large image optimized for memory | source {frame.original_size[0]} x {frame.original_size[1]} | "
+                f"working {frame.image.width} x {frame.image.height}"
+            )
         frame = self.frames[index]
         self.status_text.set(f"{frame.display_name} | {frame.image.width} x {frame.image.height}")
 
@@ -1045,11 +1075,16 @@ class EchoSightApp(tk.Tk):
 
     @staticmethod
     def _result_metrics(result: InferenceResult) -> tuple[int, float | None]:
-        confidences = [item.confidence for item in result.detections]
+        upstream = [item.confidence for item in result.detections if item.stage == "detection"]
+        confidences = upstream or [item.confidence for item in result.detections]
         confidences.extend(item.confidence for item in result.classifications)
         if result.anomaly_score is not None:
             confidences.append(result.anomaly_score)
         return len(result.detections) + len(result.classifications) + int(result.anomaly_score is not None), max(confidences, default=None)
+
+    @staticmethod
+    def _confidence_text(value: float) -> str:
+        return ">=99.99%" if value >= 0.99995 else f"{value:.2%}"
 
     def _ordered_result_indexes(self) -> list[int]:
         def sort_key(index: int) -> object:
@@ -1192,6 +1227,7 @@ class EchoSightApp(tk.Tk):
                 list(self.frames),
                 selected_results,
                 self.model_info,
+                self.model_infos,
                 self.model_parent,
                 preprocessing,
                 settings_by_frame,
@@ -1256,6 +1292,7 @@ class EchoSightApp(tk.Tk):
         frames: list[LoadedFrame],
         results: dict[int, InferenceResult],
         model_info: ModelInfo,
+        model_infos: tuple[ModelInfo, ...],
         model_parent: Path | None,
         preprocessing: dict[str, object],
         settings: dict[int, tuple[float, float, float, float]],
@@ -1273,6 +1310,7 @@ class EchoSightApp(tk.Tk):
                 frames=frames,
                 results=results,
                 model_info=model_info,
+                pipeline_model_infos=model_infos,
                 model_parent=model_parent,
                 preprocessing=preprocessing,
                 render_options_by_frame=render_options,
@@ -1320,7 +1358,11 @@ class EchoSightApp(tk.Tk):
 
     def _show_result_details(self, result: InferenceResult) -> None:
         lines = [result.summary, f"Inference: {result.duration_ms:.1f} ms", f"Input: {result.input_size[0]} x {result.input_size[1]}"]
-        lines.extend(f"{item.label}: {item.confidence:.1%}" for item in result.detections)
+        lines.extend(
+            f"{'Classification' if item.stage == 'classification' else 'Detection'} "
+            f"ROI {item.roi_index or '-'} | {item.label}: {self._confidence_text(item.confidence)}"
+            for item in result.detections
+        )
         lines.extend(f"{item.label}: {item.confidence:.1%}" for item in result.classifications)
         self.result_text.set("\n".join(lines))
         self._build_annotation_controls(result)
@@ -1332,7 +1374,11 @@ class EchoSightApp(tk.Tk):
         entries: list[str] = []
         if result.anomaly_score is not None:
             entries.append(f"Anomaly heatmap | {result.anomaly_score:.1%}")
-        entries.extend(f"{item.label} | {item.confidence:.1%}" for item in result.detections)
+        entries.extend(
+            f"{'Classification' if item.stage == 'classification' else 'Detection'} "
+            f"| ROI {item.roi_index or '-'} | {item.label} | {self._confidence_text(item.confidence)}"
+            for item in result.detections
+        )
         entries.extend(f"{item.label} | {item.confidence:.1%}" for item in result.classifications)
         if not entries:
             ttk.Label(self.annotation_container, text="No annotations", style="PanelText.TLabel").pack(anchor="w")

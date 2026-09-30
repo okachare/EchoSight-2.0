@@ -32,6 +32,7 @@ COLORS = (
     (235, 92, 116),
     (170, 126, 240),
 )
+DETECTION_COLOR = COLORS[0]
 
 
 def render_result(
@@ -43,6 +44,7 @@ def render_result(
     options = options or RenderOptions()
     hidden = hidden_annotations or set()
     rendered = source.convert("RGB").copy()
+    occupied_labels: list[tuple[int, int, int, int]] = []
 
     if result.task_type is TaskType.ANOMALY and result.anomaly_map is not None and options.show_heatmap and 0 not in hidden:
         rendered = _render_anomaly_map(rendered, result.anomaly_map, options.overlay_opacity)
@@ -50,7 +52,7 @@ def render_result(
     for index, detection in enumerate(result.detections):
         if index in hidden:
             continue
-        rendered = _render_detection(rendered, detection, options)
+        rendered = _render_detection(rendered, detection, options, occupied_labels)
 
     if options.show_labels and result.task_type is TaskType.ANOMALY and result.anomaly_score is not None and 0 not in hidden:
         color = options.annotation_color or COLORS[3]
@@ -59,10 +61,24 @@ def render_result(
     return rendered
 
 
-def _render_detection(image: Image.Image, detection: Detection, options: RenderOptions) -> Image.Image:
+def _render_detection(
+    image: Image.Image,
+    detection: Detection,
+    options: RenderOptions,
+    occupied_labels: list[tuple[int, int, int, int]] | None = None,
+) -> Image.Image:
     rendered = image
-    color = options.annotation_color or COLORS[detection.label_id % len(COLORS)]
+    if options.annotation_color is not None:
+        color = options.annotation_color
+    elif detection.stage == "classification":
+        color = COLORS[(detection.label_id + 1) % len(COLORS)]
+    else:
+        color = DETECTION_COLOR
     x1, y1, x2, y2 = _clamp_box(detection.box, rendered.size)
+    if detection.stage == "classification":
+        inset = (detection.stage_index + 1) * max(2, options.annotation_thickness)
+        x1, y1 = min(x2, x1 + inset), min(y2, y1 + inset)
+        x2, y2 = max(x1, x2 - inset), max(y1, y2 - inset)
 
     if detection.mask is not None and options.show_masks and x2 > x1 and y2 > y1:
         rendered = _blend_box_mask(
@@ -76,8 +92,24 @@ def _render_detection(image: Image.Image, detection: Detection, options: RenderO
     if options.show_boxes:
         rendered = _draw_box(rendered, (x1, y1, x2, y2), color, options.annotation_thickness, options.annotation_opacity)
     if options.show_labels:
-        rendered = _draw_label(rendered, (x1, y1), f"{detection.label} {detection.confidence:.1%}", color, options, above=True)
+        stage = "Classification" if detection.stage == "classification" else "Detection"
+        label = f"{stage} | {detection.label} | {_format_confidence(detection.confidence)}"
+        rendered = _draw_label(
+            rendered,
+            (x1, y1 + detection.stage_index * (options.font_size + 10)),
+            label,
+            color,
+            options,
+            above=detection.stage != "classification",
+            occupied=occupied_labels,
+        )
     return rendered
+
+
+def _format_confidence(value: float) -> str:
+    if value >= 0.99995:
+        return ">=99.99%"
+    return f"{value:.2%}"
 
 
 def _draw_box(
@@ -156,6 +188,7 @@ def _draw_label(
     color: tuple[int, int, int],
     options: RenderOptions,
     above: bool = False,
+    occupied: list[tuple[int, int, int, int]] | None = None,
 ) -> Image.Image:
     alpha = round(255 * float(np.clip(options.label_opacity, 0.0, 1.0)))
     if alpha == 0:
@@ -168,11 +201,36 @@ def _draw_label(
     x = min(max(0, origin[0]), max(0, image.size[0] - width))
     requested_y = origin[1] - height if above else origin[1]
     y = min(max(0, requested_y), max(0, image.size[1] - height))
+    if occupied is not None:
+        y = _available_label_y(x, y, width, height, image.size[1], occupied)
+        occupied.append((x, y, x + width, y + height))
     overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     draw.rectangle((x, y, x + width, y + height), fill=(12, 16, 20, alpha), outline=(*color, alpha))
     draw.text((x + 4, y + 4), text, fill=(240, 245, 248, alpha), font=font)
     return Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
+
+
+def _available_label_y(
+    x: int,
+    requested_y: int,
+    width: int,
+    height: int,
+    image_height: int,
+    occupied: list[tuple[int, int, int, int]],
+) -> int:
+    maximum_y = max(0, image_height - height)
+    step = height + 2
+    candidates = range(requested_y, maximum_y + 1, step)
+    for y in (*candidates, *range(requested_y - step, -1, -step)):
+        candidate = (x, y, x + width, y + height)
+        if not any(_rectangles_overlap(candidate, existing) for existing in occupied):
+            return y
+    return requested_y
+
+
+def _rectangles_overlap(first: tuple[int, int, int, int], second: tuple[int, int, int, int]) -> bool:
+    return first[0] < second[2] and first[2] > second[0] and first[1] < second[3] and first[3] > second[1]
 
 
 def _load_label_font(family: str, size: int) -> ImageFont.ImageFont | ImageFont.FreeTypeFont:

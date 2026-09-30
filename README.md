@@ -10,7 +10,9 @@ Phase 4 is complete as of 2026-09-14. EchoSight 2.0 provides parent-folder model
 
 Multi-frame TIFF pages are expanded into independent in-memory frames. Each frame can be selected and inferred individually, or all frames can be processed with Run All. No duplicate TIFF files are written to disk.
 
-Current validation: all 43 automated tests pass in the full development workspace. Phase 4 acceptance processed all 66 TIFF pages with the real `NVL_S28C_Detect_09092026_V17` package, producing 93 detections with no failed frames. `Test_Run_Instance_Segmentation` follows its embedded anomaly contract and also completed inference and export successfully.
+Oversized single-frame JPEGs and uncompressed 8-bit grayscale/palette TIFFs are loaded through a bounded working-image path. EchoSight reduces them to at most 16 megapixels before retaining an RGB copy, displays both source and working dimensions, and records both sizes in run exports. The source file is not modified. This prevents multi-gigabyte RAM and page-file allocations, but very small features can be lost when an extremely large scene is scaled to the model input; tile the source externally when full-resolution defect sensitivity is required.
+
+Current validation: all 51 automated tests pass in the full development workspace. Phase 4 acceptance processed all 66 TIFF pages with the real `NVL_S28C_Detect_09092026_V17` package, producing 93 detections with no failed frames. `Test_Run_Instance_Segmentation` follows its embedded anomaly contract and also completed inference and export successfully. The real `NCL_S_ChainedModel_Test` package compiled and ran both stages, produced three detector ROIs and 12 ordered stage annotations, and preserved both model hashes in exports.
 
 ## Shared Network Setup
 
@@ -40,12 +42,15 @@ Application and setup logs are stored under `%LOCALAPPDATA%\EchoSight\2.0\logs`.
 
 - OpenVINO IR: `.xml` with matching `.bin`
 - ONNX: `.onnx`
+- Explicit Geti `Detection -> Crop -> Classification` chained deployments
 - Detection
 - Classification
 - Instance segmentation
 - Anomaly classification and segmentation
 
 Select the trained model's parent folder. EchoSight recursively finds the deployable artifact and uses embedded metadata for task type, labels, thresholds, resize behavior, mean/scale preprocessing, channel order, and anomaly calibration. Folders containing multiple distinct models must be narrowed to one trained-model package.
+
+For a supported chained deployment, select the package folder containing `deployment/project.json`. EchoSight verifies the declared task graph, compiles both models, detects regions on the full image, crops each detected region, and applies the classification model to each crop. Results list detection first in teal, followed by each classification in its own class color with an independent confidence and visibility checkbox. The frame table ranks chained frames by upstream detection confidence so saturated classifier scores do not hide detector variation. Run manifests record both model artifacts and each annotation's stage and ROI. Other multi-model graph shapes remain unsupported and are rejected rather than ordered by folder name.
 
 ## Result Visualization
 

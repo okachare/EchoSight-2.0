@@ -7,13 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased] - 2026-09-15
+## [Unreleased] - 2026-09-30
 
 ### Added
 - Per-frame or all-frame Image Adjustments for brightness, contrast, sharpness, and continuous denoise strength.
 - Per-frame or all-frame Annotation Control for Calibri label size, annotation color, line thickness, annotation transparency, and label transparency.
 - Multi-selection Results actions for exporting original frames as model-specific False Hits or Misses retraining sets without overwriting existing files.
 - CSAM Helper and EchoSight operator-training guidance covering the complete data flow, current controls, retraining review, confidence behavior, and troubleshooting.
+- Memory-bounded loading for oversized JPEG and compatible uncompressed 8-bit TIFF images, retaining a working image of at most 16 megapixels while preserving source dimensions in exports.
+- Explicit Geti **Detection -> Crop -> Classification** pipeline support driven by `deployment/project.json`.
+- Stage-aware chained annotations with detector-first ordering, distinct colors, independent confidence values and visibility controls, and collision-aware labels.
 
 ### Changed
 - Renamed **Load Model Folder** to **Load Model**.
@@ -22,14 +25,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Gave the analyzed-image panel all surplus Results-tab width while the Results table and detail panel autosize to their contents.
 - Reduced the initial Results table column widths while preserving manual resizing and horizontal scrolling.
 - Updated exports and manifests to retain each frame's applied preprocessing and annotation-rendering settings.
+- Ranked chained results by upstream detection confidence while preserving each detector and classifier confidence independently in the UI and exports.
+- Recorded pipeline model hashes plus annotation stage and ROI identity in run evidence.
 
 ### Fixed
 - Preserved multi-row Results selections during list refreshes so batch False Hit and Miss exports remain reliable.
 - Kept original, unannotated image pixels and TIFF-safe frame names in retraining exports.
+- Prevented oversized source images from exhausting system memory during loading.
+- Prevented chained detection and classification outputs from being collapsed into a single annotation and confidence value.
+- Prevented annotation labels from obscuring one another when chained ROIs are closely spaced.
 
 ### Validated
-- All 43 automated tests pass, including desktop workflow, rendering pixels, per-frame exports, and retraining safeguards.
+- All 51 automated tests pass, including giant-image loading, chained inference, stage-aware rendering, desktop workflow, exports, and retraining safeguards.
 - The Results image panel receives the dominant width in a real 3840-pixel Tk layout check.
+- The real `NCL_S_ChainedModel_Test` package compiled both models, produced three detector ROIs, classified every crop, rendered 12 ordered stage annotations, and preserved both model hashes in exports.
 
 ## [2.0.0] - 2026-09-14
 

@@ -8,8 +8,10 @@ from .engine import (
 	PreparedImage,
 )
 from .model_loader import ModelInfo, ModelLoader, TaskType, TensorInfo
+from .pipeline import ChainedInferenceEngine, discover_detection_classification_chain
 
 __all__ = [
+	"ChainedInferenceEngine",
 	"Classification",
 	"Detection",
 	"InferenceEngine",
@@ -19,4 +21,5 @@ __all__ = [
 	"PreparedImage",
 	"TaskType",
 	"TensorInfo",
+	"discover_detection_classification_chain",
 ]

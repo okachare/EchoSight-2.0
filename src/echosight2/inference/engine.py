@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +22,10 @@ class Detection:
     confidence: float
     box: tuple[float, float, float, float]
     mask: np.ndarray | None = None
+    detector_confidence: float | None = None
+    stage: str = "detection"
+    roi_index: int | None = None
+    stage_index: int = 0
 
 
 @dataclass(frozen=True)
@@ -212,7 +217,14 @@ class InferenceEngine:
         outputs: Mapping[str, np.ndarray],
         prepared: PreparedImage,
     ) -> tuple[Detection, ...]:
-        boxes = self._find_output(outputs, "boxes")
+        boxes = self._optional_output(outputs, "boxes")
+        if boxes is None:
+            coordinates = self._find_output(outputs, "bboxes")
+            scores = self._find_output(outputs, "scores")
+            boxes = np.concatenate(
+                (np.asarray(coordinates), np.asarray(scores)[..., None]),
+                axis=-1,
+            )
         labels = self._find_output(outputs, "labels")
         masks = self._optional_output(outputs, "masks")
         boxes = np.asarray(boxes).reshape(-1, boxes.shape[-1])
@@ -235,11 +247,12 @@ class InferenceEngine:
                 continue
             label_id = int(labels[index]) if index < labels.size else 0
             label = self.model_info.labels[label_id] if 0 <= label_id < len(self.model_info.labels) else f"Class {label_id}"
-            coordinates = (
-                (float(box[0]) - padding_x) * scale_x,
-                (float(box[1]) - padding_y) * scale_y,
-                (float(box[2]) - padding_x) * scale_x,
-                (float(box[3]) - padding_y) * scale_y,
+            box_coordinates = np.asarray(box[:4], dtype=np.float64)
+            if np.all(np.isfinite(box_coordinates)) and np.max(np.abs(box_coordinates)) <= 1.5:
+                box_coordinates *= (prepared.input_size[0], prepared.input_size[1], prepared.input_size[0], prepared.input_size[1])
+            coordinates = tuple(
+                ((float(value) - (padding_x if position % 2 == 0 else padding_y)) * (scale_x if position % 2 == 0 else scale_y))
+                for position, value in enumerate(box_coordinates)
             )
             mask = np.asarray(masks[index]) if masks is not None and index < len(masks) else None
             detections.append(Detection(label_id, label, confidence, coordinates, mask))
@@ -249,6 +262,9 @@ class InferenceEngine:
         values = self._first_output(outputs).astype(np.float64, copy=False).reshape(-1)
         if values.size == 0:
             return ()
+        metadata = dict(self.model_info.metadata)
+        if metadata.get("hierarchical", "false").lower() == "true":
+            return self._normalize_hierarchical_classification(values, metadata)
         if np.any(values < 0) or np.any(values > 1) or not np.isclose(values.sum(), 1.0, atol=0.01):
             shifted = values - np.max(values)
             values = np.exp(shifted) / np.exp(shifted).sum()
@@ -258,6 +274,35 @@ class InferenceEngine:
             label = self.model_info.labels[label_id] if label_id < len(self.model_info.labels) else f"Class {label_id}"
             results.append(Classification(int(label_id), label, float(values[label_id])))
         return tuple(results)
+
+    def _normalize_hierarchical_classification(
+        self,
+        values: np.ndarray,
+        metadata: Mapping[str, str],
+    ) -> tuple[Classification, ...]:
+        try:
+            config = json.loads(metadata["hierarchical_config"])["cls_heads_info"]
+            label_to_index = {str(label): int(index) for label, index in config["label_to_idx"].items()}
+            probabilities = np.zeros_like(values, dtype=np.float64)
+            covered: set[int] = set()
+            for start, end in config.get("head_idx_to_logits_range", {}).values():
+                start, end = int(start), int(end)
+                logits = values[start:end] - np.max(values[start:end])
+                probabilities[start:end] = np.exp(logits) / np.exp(logits).sum()
+                covered.update(range(start, end))
+            for index in set(range(values.size)) - covered:
+                probabilities[index] = 1.0 / (1.0 + np.exp(-values[index]))
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            shifted = values - np.max(values)
+            probabilities = np.exp(shifted) / np.exp(shifted).sum()
+            label_to_index = {label: index for index, label in enumerate(self.model_info.labels)}
+
+        results = []
+        for label_id, label in enumerate(self.model_info.labels):
+            output_index = label_to_index.get(label, label_to_index.get(label.replace(" ", "_"), label_id))
+            if 0 <= output_index < probabilities.size:
+                results.append(Classification(label_id, label, float(probabilities[output_index])))
+        return tuple(sorted(results, key=lambda item: item.confidence, reverse=True))
 
     @staticmethod
     def _find_output(outputs: Mapping[str, np.ndarray], name: str) -> np.ndarray:

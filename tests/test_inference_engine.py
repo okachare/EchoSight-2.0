@@ -61,6 +61,59 @@ def test_uses_confidence_threshold_from_model_metadata() -> None:
     assert engine.confidence_threshold == pytest.approx(0.1)
 
 
+def test_normalizes_separate_detection_outputs_and_relative_boxes() -> None:
+    info = _model_info(TaskType.DETECTION)
+    engine = InferenceEngine(info, compiled_model=None, confidence_threshold=0.5)
+    prepared = engine.prepare_image(Image.new("RGB", (400, 200), "white"))
+
+    result = engine.normalize(
+        {
+            "bboxes": np.array([[[0.1, 0.2, 0.6, 0.8]]], dtype=np.float32),
+            "scores": np.array([[0.9]], dtype=np.float32),
+            "labels": np.array([[0]], dtype=np.int64),
+        },
+        prepared,
+        3.0,
+    )
+
+    assert len(result.detections) == 1
+    assert result.detections[0].confidence == pytest.approx(0.9)
+    assert result.detections[0].box == pytest.approx((40.0, 40.0, 240.0, 160.0))
+
+
+def test_normalizes_hierarchical_classification_heads() -> None:
+    info = _model_info(TaskType.CLASSIFICATION)
+    info = ModelInfo(
+        path=info.path,
+        format=info.format,
+        task_type=info.task_type,
+        inputs=info.inputs,
+        outputs=info.outputs,
+        labels=("Class A", "Class B", "Flag"),
+        model_type=info.model_type,
+        device=info.device,
+        metadata=(
+            ("hierarchical", "True"),
+            (
+                "hierarchical_config",
+                (
+                    '{"cls_heads_info":{"label_to_idx":{"Class A":0,"Class B":1,"Flag":2},'
+                    '"head_idx_to_logits_range":{"0":[0,2]}}}'
+                ),
+            ),
+        ),
+    )
+    engine = InferenceEngine(info, compiled_model=None)
+    prepared = engine.prepare_image(Image.new("RGB", (200, 100), "white"))
+
+    result = engine.normalize({"output1": np.array([[2.0, 0.0, 1.0]], dtype=np.float32)}, prepared, 2.0)
+
+    by_label = {item.label: item.confidence for item in result.classifications}
+    assert by_label["Class A"] == pytest.approx(0.880797)
+    assert by_label["Class B"] == pytest.approx(0.119203)
+    assert by_label["Flag"] == pytest.approx(0.731059)
+
+
 def test_applies_model_metadata_preprocessing() -> None:
     info = _model_info(TaskType.ANOMALY)
     info = ModelInfo(

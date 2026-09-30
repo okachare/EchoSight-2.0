@@ -26,6 +26,10 @@ Double-click `Launch_EchoSight.bat` in the shared folder. Run `SETUP.ps1` again 
 
 Supported inputs are PNG, JPEG, BMP, WebP, TIFF, and multi-frame TIFF.
 
+For a Geti chained deployment, select the package folder above `deployment/project.json`. EchoSight currently supports the explicit **Detection -> Crop -> Classification** graph. Each detected box is cropped and passed to the classifier. Results shows the teal detection annotation first, followed by separate class-colored classification annotations with independent confidence values and visibility checkboxes. The frame list's highest-confidence column uses upstream detection confidence for chained results. Both stages and thresholds appear in Model Information, and both model artifacts are recorded in the run manifest.
+
+For oversized single-frame JPEGs and compatible uncompressed 8-bit TIFFs, EchoSight creates a memory-bounded working image of at most 16 megapixels. The source remains unchanged, and the image list, Terminal, CSV, and run manifest identify the optimization and original/working dimensions. Because the model analyzes the reduced full scene, split or tile a very large image when defects may be too small to survive whole-image scaling.
+
 During a multi-frame run, select **Pause** to stop before the next frame. The control changes to **Resume** and continues from the same position when selected again. **Cancel** stops the remaining frames while retaining completed results.
 
 Use the mouse wheel over either image preview to zoom and drag the image to pan. Double-click the preview to restore fit-to-view. In Analysis, select the settings icon at the lower-right of the preview to adjust brightness, contrast, sharpness, and exact denoise strength. Changes preview immediately. Select **Apply to current frame** or **Apply to all frames** to choose the processing scope used by inference and exports.

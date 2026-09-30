@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
+
 from echosight2.exporting import export_run
 from echosight2.frames import LoadedFrame
 from echosight2.inference import (
@@ -14,7 +16,6 @@ from echosight2.inference import (
     TensorInfo,
 )
 from echosight2.rendering import RenderOptions
-from PIL import Image
 
 
 def _model_info(model_path: Path, task: TaskType = TaskType.DETECTION) -> ModelInfo:
@@ -112,6 +113,7 @@ def test_export_run_writes_reproducible_detection_artifacts(tmp_path: Path) -> N
     assert rows[0]["result_type"] == "detection"
     assert rows[0]["source_sha256"] == manifest["frames"][0]["source_sha256"]
     assert rows[0]["confidence"] == "0.82"
+    assert rows[0]["annotation_stage"] == "detection"
     assert rows[1]["status"] == "failed"
 
 

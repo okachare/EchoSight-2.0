@@ -1,9 +1,10 @@
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
+
 from echosight2.frames import LoadedFrame
 from echosight2.training import export_training_frames
-from PIL import Image
 
 
 def test_exports_selected_original_frames_to_model_category_folder(tmp_path: Path) -> None:

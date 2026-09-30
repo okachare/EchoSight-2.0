@@ -4,12 +4,13 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import numpy as np
+from PIL import Image
+
 from echosight2.desktop import EchoSightApp
 from echosight2.frames import LoadedFrame
 from echosight2.inference import Classification, Detection, InferenceResult, TaskType
 from echosight2.rendering import RenderOptions
 from echosight2.training import TrainingExport
-from PIL import Image
 
 
 def _result(confidence: float) -> InferenceResult:
@@ -29,6 +30,26 @@ def test_result_metrics_report_annotation_count_and_highest_confidence() -> None
 
     assert annotations == 2
     assert confidence == 0.91
+
+
+def test_chained_result_metrics_use_upstream_detection_confidence() -> None:
+    result = InferenceResult(
+        source=Path("inspection.tiff"),
+        task_type=TaskType.DETECTION,
+        image_size=(64, 48),
+        input_size=(32, 32),
+        duration_ms=4.0,
+        detections=(
+            Detection(0, "Anomaly", 0.73, (1.0, 2.0, 20.0, 30.0), stage="detection", roi_index=1),
+            Detection(1, "Voids", 1.0, (1.0, 2.0, 20.0, 30.0), stage="classification", roi_index=1),
+        ),
+    )
+
+    annotations, confidence = EchoSightApp._result_metrics(result)
+
+    assert annotations == 2
+    assert confidence == 0.73
+    assert EchoSightApp._confidence_text(1.0) == ">=99.99%"
 
 
 def test_current_export_payload_excludes_other_results_and_failures() -> None:
