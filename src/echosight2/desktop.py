@@ -1085,6 +1085,7 @@ class EchoSightApp(tk.Tk):
             self._finish_inference("Inference failed")
             messagebox.showerror("Inference error", str(payload))
         elif event == "cancelled":
+            self.progress.configure(value=0)
             self._finish_inference(f"Cancelled after {payload} frame(s)")
         else:
             completed, failed = payload

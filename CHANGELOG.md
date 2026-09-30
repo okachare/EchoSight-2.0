@@ -38,9 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prevented oversized source images from exhausting system memory during loading.
 - Prevented chained detection and classification outputs from being collapsed into a single annotation and confidence value.
 - Prevented annotation labels from obscuring one another when chained ROIs are closely spaced.
+- Reset the Analysis progress bar after an inference cancellation is acknowledged.
 
 ### Validated
-- All 56 automated tests pass, including giant-image loading, chained inference, stage-aware rendering, resource clearing, Terminal log export, desktop workflow, exports, and retraining safeguards.
+- All 57 automated tests pass, including giant-image loading, chained inference, stage-aware rendering, cancellation behavior, resource clearing, Terminal log export, desktop workflow, exports, and retraining safeguards.
 - The Results image panel receives the dominant width in a real 3840-pixel Tk layout check.
 - The real `NCL_S_ChainedModel_Test` package compiled both models, produced three detector ROIs, classified every crop, rendered 12 ordered stage annotations, and preserved both model hashes in exports.
 

@@ -1,3 +1,4 @@
+import queue
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -206,6 +207,19 @@ def test_pause_gate_blocks_until_resume() -> None:
     app.resume_activity.set()
     assert completed.wait(1.0)
     worker.join()
+
+
+def test_cancelled_inference_resets_progress_bar() -> None:
+    app = object.__new__(EchoSightApp)
+    app.inference_events = queue.Queue()
+    app.inference_events.put(("cancelled", 3))
+    app.progress = Mock()
+    app._finish_inference = Mock()
+
+    app._poll_inference()
+
+    app.progress.configure.assert_called_once_with(value=0)
+    app._finish_inference.assert_called_once_with("Cancelled after 3 frame(s)")
 
 
 def test_maximize_window_uses_zoomed_state_when_supported() -> None:
