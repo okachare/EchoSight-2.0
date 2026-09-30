@@ -77,6 +77,7 @@ def test_export_run_writes_reproducible_detection_artifacts(tmp_path: Path) -> N
         ),
         render_options_by_frame={0: RenderOptions(font_size=20, annotation_color=(90, 80, 70))},
         failures={1: "Unsupported frame data"},
+        effective_confidence_thresholds=(0.05,),
         exported_at=datetime(2026, 9, 10, 12, 30, tzinfo=timezone.utc),
     )
 
@@ -91,6 +92,8 @@ def test_export_run_writes_reproducible_detection_artifacts(tmp_path: Path) -> N
     assert manifest["model"]["artifact_sha256"]
     assert manifest["model"]["weights_sha256"]
     assert manifest["model"]["confidence_threshold"] == 0.1
+    assert manifest["model"]["effective_confidence_threshold"] == 0.05
+    assert manifest["model"]["confidence_threshold_overridden"] is True
     assert manifest["processing"]["user_preprocessing"]["brightness"] == 1.0
     assert manifest["processing"]["render_options"]["show_labels"] is False
     assert manifest["processing"]["render_options"]["font_family"] == "Calibri"

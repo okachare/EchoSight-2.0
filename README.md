@@ -12,7 +12,7 @@ Multi-frame TIFF pages are expanded into independent in-memory frames. Each fram
 
 Oversized single-frame JPEGs and uncompressed 8-bit grayscale/palette TIFFs are loaded through a bounded working-image path. EchoSight reduces them to at most 16 megapixels before retaining an RGB copy, displays both source and working dimensions, and records both sizes in run exports. The source file is not modified. This prevents multi-gigabyte RAM and page-file allocations, but very small features can be lost when an extremely large scene is scaled to the model input; tile the source externally when full-resolution defect sensitivity is required.
 
-Current validation: all 51 automated tests pass in the full development workspace. Phase 4 acceptance processed all 66 TIFF pages with the real `NVL_S28C_Detect_09092026_V17` package, producing 93 detections with no failed frames. `Test_Run_Instance_Segmentation` follows its embedded anomaly contract and also completed inference and export successfully. The real `NCL_S_ChainedModel_Test` package compiled and ran both stages, produced three detector ROIs and 12 ordered stage annotations, and preserved both model hashes in exports.
+Current validation: all 56 automated tests pass in the full development workspace. Phase 4 acceptance processed all 66 TIFF pages with the real `NVL_S28C_Detect_09092026_V17` package, producing 93 detections with no failed frames. `Test_Run_Instance_Segmentation` follows its embedded anomaly contract and also completed inference and export successfully. The real `NCL_S_ChainedModel_Test` package compiled and ran both stages, produced three detector ROIs and 12 ordered stage annotations, and preserved both model hashes in exports.
 
 ## Shared Network Setup
 
@@ -52,8 +52,11 @@ Select the trained model's parent folder. EchoSight recursively finds the deploy
 
 For a supported chained deployment, select the package folder containing `deployment/project.json`. EchoSight verifies the declared task graph, compiles both models, detects regions on the full image, crops each detected region, and applies the classification model to each crop. Results list detection first in teal, followed by each classification in its own class color with an independent confidence and visibility checkbox. The frame table ranks chained frames by upstream detection confidence so saturated classifier scores do not hide detector variation. Run manifests record both model artifacts and each annotation's stage and ROI. Other multi-model graph shapes remain unsupported and are rejected rather than ordered by folder name.
 
+The model's embedded confidence threshold remains the default. Experienced reviewers can open the small dropdown at the lower-right of Model Information, explicitly enable the advanced threshold override, and set stage-specific thresholds. Applying or resetting an override clears existing results and requires inference to be rerun; the compiled model is reused. Active overrides are identified in Model Information, the Terminal, and Results under Annotations. Exports record both embedded and effective thresholds. Overrides are session-only and reset when another model is loaded or EchoSight restarts.
+
 ## Result Visualization
 
+- Side-by-side **Clear Model** and **Clear Images** actions that remove only the selected resource type and clear dependent results safely
 - Detection boxes and confidence labels
 - Instance mask overlays
 - Calibrated anomaly heatmaps and scores
@@ -64,6 +67,7 @@ For a supported chained deployment, select the package folder containing `deploy
 - Mouse-wheel zoom, drag-to-pan, and double-click fit reset in both previews
 - Per-frame or all-frame brightness, contrast, sharpness, and denoise-strength controls with live Analysis preview
 - Sortable frame, task, annotation-count, and highest-confidence results
+- User-selected export of the visible Terminal session to a UTF-8 `.log` or `.txt` file
 
 Results are generated from the embedded model task contract. A package whose name says instance segmentation but whose model metadata says anomaly will produce anomaly output.
 

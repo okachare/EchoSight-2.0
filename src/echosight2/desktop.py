@@ -173,6 +173,9 @@ class EchoSightApp(tk.Tk):
         self.result_sort_descending = False
         self.preprocess_popup: tk.Toplevel | None = None
         self.annotation_popup: tk.Toplevel | None = None
+        self.threshold_popup: tk.Toplevel | None = None
+        self.threshold_variables: list[tk.DoubleVar] = []
+        self.model_detail_base = ""
         self.annotation_color: tuple[int, int, int] | None = None
         self.choosing_annotation_color = False
         self.inference_running = False
@@ -197,6 +200,7 @@ class EchoSightApp(tk.Tk):
         self.contrast = tk.DoubleVar(value=1.0)
         self.sharpness = tk.DoubleVar(value=1.0)
         self.denoise_strength = tk.DoubleVar(value=0.0)
+        self.threshold_override_enabled = tk.BooleanVar(value=False)
 
         self._configure_styles()
         self._build_layout()
@@ -287,6 +291,25 @@ class EchoSightApp(tk.Tk):
         self.load_model_button.pack(fill="x")
         self.open_images_button = ttk.Button(actions, text="Open Images", style="Tool.TButton", command=self._select_images)
         self.open_images_button.pack(fill="x", pady=(6, 0))
+        clear_row = ttk.Frame(actions, style="Panel.TFrame")
+        clear_row.pack(fill="x", pady=(6, 0))
+        clear_row.columnconfigure((0, 1), weight=1, uniform="clear-actions")
+        self.clear_model_button = ttk.Button(
+            clear_row,
+            text="Clear Model",
+            style="Tool.TButton",
+            state="disabled",
+            command=self._clear_model,
+        )
+        self.clear_model_button.grid(row=0, column=0, sticky="ew", padx=(0, 3))
+        self.clear_images_button = ttk.Button(
+            clear_row,
+            text="Clear Images",
+            style="Tool.TButton",
+            state="disabled",
+            command=self._clear_images,
+        )
+        self.clear_images_button.grid(row=0, column=1, sticky="ew", padx=(3, 0))
         self.model_name = tk.StringVar(value="No model loaded")
         ttk.Label(sources, textvariable=self.model_name, style="PanelText.TLabel", wraplength=220).pack(anchor="w", pady=(0, 8))
         self.image_list = self._new_listbox(sources)
@@ -320,6 +343,15 @@ class EchoSightApp(tk.Tk):
         model_scrollbar.configure(command=self.model_detail.yview)
         self.model_detail.pack(side="left", fill="both", expand=True)
         model_scrollbar.pack(side="right", fill="y")
+        self.threshold_button = ttk.Button(
+            model_info_area,
+            text="\u25be",
+            width=2,
+            style="Tool.TButton",
+            state="disabled",
+            command=self._toggle_threshold_popup,
+        )
+        self.threshold_button.place(relx=1.0, rely=1.0, x=-18, y=-10, anchor="se")
         self._set_model_detail("Select the trained model's parent folder. EchoSight will locate the deployable OpenVINO IR or ONNX artifact.")
         self.run_all_button = ttk.Button(model_panel, text="Run All", style="Accent.TButton", state="disabled", command=self._run_all)
         self.run_all_button.pack(fill="x", pady=(12, 0))
@@ -343,6 +375,13 @@ class EchoSightApp(tk.Tk):
         ttk.Label(terminal_panel, text="TERMINAL", style="PanelTitle.TLabel").pack(anchor="w")
         self.terminal = tk.Text(terminal_panel, background="#0b0e12", foreground="#9fb0bd", insertbackground="#ffffff", borderwidth=0, wrap="word", state="disabled", font=("Consolas", 8))
         self.terminal.pack(fill="both", expand=True, pady=(8, 0))
+        self.save_terminal_button = ttk.Button(
+            terminal_panel,
+            text="Save Terminal Log",
+            style="Tool.TButton",
+            command=self._save_terminal_log,
+        )
+        self.save_terminal_button.place(relx=1.0, rely=1.0, x=-8, y=-8, anchor="se")
 
     def _build_preprocess_controls(self, parent: ttk.Frame) -> None:
         for label, variable, start, end in (
@@ -621,6 +660,7 @@ class EchoSightApp(tk.Tk):
         for popup, close in (
             (self.preprocess_popup, self._close_preprocess_popup),
             (self.annotation_popup, self._close_annotation_popup),
+            (self.threshold_popup, self._close_threshold_popup),
         ):
             if popup is not None and popup.winfo_exists() and not self._is_descendant(event.widget, popup):
                 close()
@@ -667,6 +707,10 @@ class EchoSightApp(tk.Tk):
         self.model_info = None
         self.model_infos = ()
         self.inference_engine = None
+        self.threshold_override_enabled.set(False)
+        self.threshold_variables.clear()
+        self._close_threshold_popup()
+        self.threshold_button.configure(state="disabled")
         self.results.clear()
         self.inference_failures.clear()
         self._clear_results_ui()
@@ -733,7 +777,7 @@ class EchoSightApp(tk.Tk):
             f"(threshold {info.confidence_threshold:.1%})"
             for position, info in enumerate(self.model_infos, start=1)
         )
-        self._set_model_detail(
+        self.model_detail_base = (
             f"Model: {metadata.get('model_name', self.model_info.path.stem)}\n"
             f"Pipeline: {pipeline}\n"
             f"Stages:\n{stage_details}\n"
@@ -759,6 +803,8 @@ class EchoSightApp(tk.Tk):
             f"Reverse channels: {metadata.get('reverse_input_channels', 'Not embedded')}\n"
             f"Outputs:\n{outputs}\n\nEvaluation scores:\n{metrics}"
         )
+        self._refresh_model_detail()
+        self.threshold_button.configure(state="normal")
         self._log(
             f"Model ready | {metadata.get('model_name', self.model_info.task_type.value)} | "
             f"threshold {self.model_info.confidence_threshold:.1%} | {len(self.model_info.metrics)} metric(s)"
@@ -775,6 +821,48 @@ class EchoSightApp(tk.Tk):
         self._log(f"Loading {len(paths)} image file(s)")
         threading.Thread(target=self._image_worker, args=(paths,), daemon=True).start()
         self.after(100, self._poll_images)
+
+    def _clear_model(self) -> None:
+        if self.inference_running or self.export_running or self.model_info is None:
+            return
+        self._close_threshold_popup()
+        self.model_path = None
+        self.model_parent = None
+        self.model_info = None
+        self.model_infos = ()
+        self.inference_engine = None
+        self.model_detail_base = ""
+        self.threshold_override_enabled.set(False)
+        self.threshold_variables.clear()
+        self.model_name.set("No model loaded")
+        self._set_model_detail("Select the trained model's parent folder. EchoSight will locate the deployable OpenVINO IR or ONNX artifact.")
+        self.results.clear()
+        self.inference_failures.clear()
+        self.hidden_annotations.clear()
+        self._clear_results_ui()
+        self._log("Model cleared | Loaded images retained")
+        self.status_text.set("Model cleared | Load a model to run inference")
+        self._update_run_state()
+
+    def _clear_images(self) -> None:
+        if self.inference_running or self.export_running or not self.frames:
+            return
+        self.frames.clear()
+        self.results.clear()
+        self.inference_failures.clear()
+        self.hidden_annotations.clear()
+        self.preprocess_profiles.clear()
+        self.annotation_profiles.clear()
+        self.annotation_variables.clear()
+        self.current_analysis_index = None
+        self.current_result_index = None
+        self.image_list.delete(0, tk.END)
+        self.analysis_canvas.set_image(None)
+        self._clear_results_ui()
+        self._load_preprocess_profile(None)
+        self._log("Images cleared | Loaded model retained" if self.model_info else "Images cleared")
+        self.status_text.set("Images cleared | Open images to continue")
+        self._update_run_state()
 
     def _image_worker(self, paths: list[Path]) -> None:
         frames: list[LoadedFrame] = []
@@ -915,6 +1003,8 @@ class EchoSightApp(tk.Tk):
         self._update_run_state()
         self._set_activity("Running inference", True)
         self._log(f"Inference started | {len(frames)} frame(s)")
+        if self._threshold_override_active():
+            self._log(f"WARNING | Threshold override active | {self._threshold_summary()}")
         settings = {index: self._preprocess_settings(index) for index, _frame in frames}
         for index, _frame in frames:
             self.inference_failures.pop(index, None)
@@ -1234,6 +1324,7 @@ class EchoSightApp(tk.Tk):
                 {index: self._render_options(index) for index in range(len(self.frames))},
                 {index: set(hidden) for index, hidden in self.hidden_annotations.items()},
                 selected_failures,
+                tuple(engine.confidence_threshold for engine in self._threshold_engines()),
             ),
             daemon=True,
         ).start()
@@ -1299,6 +1390,7 @@ class EchoSightApp(tk.Tk):
         render_options: dict[int, RenderOptions],
         hidden_annotations: dict[int, set[int]],
         failures: dict[int, str],
+        effective_confidence_thresholds: tuple[float, ...],
     ) -> None:
         try:
             def report_progress(position: int, total: int, name: str) -> None:
@@ -1318,6 +1410,7 @@ class EchoSightApp(tk.Tk):
                 failures=failures,
                 frame_image_transform=lambda image, index: self._process_image(image, settings[index]),
                 progress=report_progress,
+                effective_confidence_thresholds=effective_confidence_thresholds,
             )
             self.export_events.put(("complete", report))
         except Exception as error:
@@ -1371,6 +1464,15 @@ class EchoSightApp(tk.Tk):
         for child in self.annotation_container.winfo_children():
             child.destroy()
         self.annotation_variables.clear()
+        if self._threshold_override_active():
+            ttk.Label(
+                self.annotation_container,
+                text=f"Threshold override active | {self._threshold_summary()}",
+                style="PanelText.TLabel",
+                foreground="#f2b35d",
+                wraplength=280,
+                justify="left",
+            ).pack(anchor="w", pady=(0, 7))
         entries: list[str] = []
         if result.anomaly_score is not None:
             entries.append(f"Anomaly heatmap | {result.anomaly_score:.1%}")
@@ -1420,6 +1522,13 @@ class EchoSightApp(tk.Tk):
         self.export_button.configure(state=export_state)
         current_export_state = "normal" if self.current_result_index in self.results and export_state == "normal" else "disabled"
         self.export_current_button.configure(state=current_export_state)
+        threshold_state = "normal" if self.model_info and not self.inference_running and not self.export_running else "disabled"
+        self.threshold_button.configure(state=threshold_state)
+        self.clear_model_button.configure(state=threshold_state)
+        clear_images_state = "normal" if self.frames and not self.inference_running and not self.export_running else "disabled"
+        self.clear_images_button.configure(state=clear_images_state)
+        terminal_state = "normal" if not self.export_running else "disabled"
+        self.save_terminal_button.configure(state=terminal_state)
         self._update_training_button_state()
 
     def _set_activity(self, text: str, active: bool) -> None:
@@ -1432,6 +1541,140 @@ class EchoSightApp(tk.Tk):
         self.model_detail.delete("1.0", tk.END)
         self.model_detail.insert("1.0", text)
         self.model_detail.configure(state="disabled")
+
+    def _threshold_engines(self) -> tuple[InferenceEngine, ...]:
+        if isinstance(self.inference_engine, ChainedInferenceEngine):
+            return self.inference_engine.detector, self.inference_engine.classifier
+        if isinstance(self.inference_engine, InferenceEngine):
+            return (self.inference_engine,)
+        return ()
+
+    def _threshold_override_active(self) -> bool:
+        engines = self._threshold_engines()
+        return bool(engines) and any(
+            abs(engine.confidence_threshold - info.confidence_threshold) > 1e-9
+            for engine, info in zip(engines, self.model_infos)
+        )
+
+    def _threshold_summary(self) -> str:
+        return " | ".join(
+            f"{info.task_type.value.replace('_', ' ').title()} {engine.confidence_threshold:.0%} (model {info.confidence_threshold:.0%})"
+            for engine, info in zip(self._threshold_engines(), self.model_infos)
+        )
+
+    def _refresh_model_detail(self) -> None:
+        warning = ""
+        if self._threshold_override_active():
+            warning = (
+                "\n\nWARNING: THRESHOLD OVERRIDE ACTIVE\n"
+                f"{self._threshold_summary()}\n"
+                "Lower thresholds may produce false or duplicate detections. Rerun inference after changes."
+            )
+        self._set_model_detail(self.model_detail_base + warning)
+
+    def _toggle_threshold_popup(self) -> None:
+        if self.threshold_popup is not None and self.threshold_popup.winfo_exists():
+            self._close_threshold_popup()
+            return
+        engines = self._threshold_engines()
+        if not engines:
+            return
+        self.threshold_override_enabled.set(self._threshold_override_active())
+        self.threshold_variables = [tk.DoubleVar(value=engine.confidence_threshold) for engine in engines]
+        popup = tk.Toplevel(self)
+        self.threshold_popup = popup
+        popup.overrideredirect(True)
+        popup.configure(background="#45484c")
+        panel = ttk.Frame(popup, style="Panel.TFrame", padding=14)
+        panel.pack(fill="both", expand=True, padx=1, pady=1)
+        ttk.Label(panel, text="THRESHOLD OVERRIDE", style="PanelTitle.TLabel").pack(anchor="w")
+        ttk.Label(
+            panel,
+            text="Advanced review only. Lower thresholds may produce many false or duplicate detections. Inference must be rerun.",
+            style="PanelText.TLabel",
+            foreground="#f2b35d",
+            wraplength=310,
+            justify="left",
+        ).pack(anchor="w", pady=(6, 10))
+        controls: list[ttk.Scale] = []
+
+        def update_state() -> None:
+            state = "normal" if self.threshold_override_enabled.get() else "disabled"
+            for control in controls:
+                control.configure(state=state)
+
+        ttk.Checkbutton(
+            panel,
+            text="Override model confidence threshold",
+            variable=self.threshold_override_enabled,
+            command=update_state,
+            style="Panel.TCheckbutton",
+        ).pack(anchor="w", pady=(0, 8))
+        for info, variable in zip(self.model_infos, self.threshold_variables):
+            row = ttk.Frame(panel, style="Panel.TFrame")
+            row.pack(fill="x", pady=2)
+            label = info.task_type.value.replace("_", " ").title()
+            ttk.Label(row, text=f"{label} (model {info.confidence_threshold:.0%})", style="PanelText.TLabel", width=27).pack(side="left")
+            value = ttk.Label(row, style="PanelText.TLabel", width=6, anchor="e")
+            value.pack(side="right")
+
+            def update(_: str | None = None, current=variable, output=value) -> None:
+                output.configure(text=f"{current.get():.0%}")
+
+            control = ttk.Scale(row, variable=variable, from_=0.01, to=1.0, command=update)
+            control.pack(side="left", fill="x", expand=True, padx=(4, 8))
+            controls.append(control)
+            update()
+        update_state()
+        ttk.Button(panel, text="Apply override", style="Danger.TButton", command=self._apply_threshold_override).pack(fill="x", pady=(10, 0))
+        ttk.Button(panel, text="Reset to model defaults", style="Tool.TButton", command=self._reset_threshold_override).pack(fill="x", pady=(6, 0))
+        popup.update_idletasks()
+        x = self.threshold_button.winfo_rootx() + self.threshold_button.winfo_width() - popup.winfo_reqwidth()
+        y = self.threshold_button.winfo_rooty() - popup.winfo_reqheight() - 8
+        popup.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+    def _apply_threshold_override(self) -> None:
+        if self.inference_running or self.export_running:
+            return
+        if not self.threshold_override_enabled.get():
+            self._reset_threshold_override()
+            return
+        if not messagebox.askyesno(
+            "Apply threshold override?",
+            "Lower thresholds may produce many false or duplicate detections. Existing results will be cleared and inference must be rerun.\n\nApply this advanced override?",
+            parent=self.threshold_popup or self,
+        ):
+            return
+        self._set_effective_thresholds(tuple(variable.get() for variable in self.threshold_variables))
+
+    def _reset_threshold_override(self) -> None:
+        if self.inference_running or self.export_running:
+            return
+        self.threshold_override_enabled.set(False)
+        self._set_effective_thresholds(tuple(info.confidence_threshold for info in self.model_infos))
+
+    def _set_effective_thresholds(self, values: tuple[float, ...]) -> None:
+        engines = self._threshold_engines()
+        if len(values) != len(engines):
+            return
+        changed = any(abs(engine.confidence_threshold - value) > 1e-9 for engine, value in zip(engines, values))
+        for engine, value in zip(engines, values):
+            engine.confidence_threshold = min(1.0, max(0.01, float(value)))
+        if changed:
+            self.results.clear()
+            self.inference_failures.clear()
+            self.hidden_annotations.clear()
+            self._clear_results_ui()
+        self._refresh_model_detail()
+        state = "active" if self._threshold_override_active() else "reset to model defaults"
+        self._log(f"WARNING | Threshold override {state} | {self._threshold_summary()}")
+        self._close_threshold_popup()
+        self._update_run_state()
+
+    def _close_threshold_popup(self) -> None:
+        if self.threshold_popup is not None and self.threshold_popup.winfo_exists():
+            self.threshold_popup.destroy()
+        self.threshold_popup = None
 
     @staticmethod
     def _metadata_percent(metadata: dict[str, str], key: str) -> str:
@@ -1449,11 +1692,31 @@ class EchoSightApp(tk.Tk):
         self.terminal.see(tk.END)
         self.terminal.configure(state="disabled")
 
+    def _save_terminal_log(self) -> None:
+        selected = filedialog.asksaveasfilename(
+            title="Save Terminal Log",
+            defaultextension=".log",
+            initialfile=f"EchoSight_Terminal_{datetime.now().astimezone():%Y%m%d_%H%M%S}.log",
+            filetypes=(("Log files", "*.log"), ("Text files", "*.txt"), ("All files", "*.*")),
+        )
+        if not selected:
+            return
+        content = self.terminal.get("1.0", "end-1c")
+        try:
+            Path(selected).write_text(content + ("\n" if content else ""), encoding="utf-8")
+        except OSError as error:
+            self._log(f"ERROR | Terminal log save failed: {error}")
+            messagebox.showerror("Save Terminal Log", str(error))
+            return
+        self._log(f"Terminal log saved | {selected}")
+        self.status_text.set(f"Terminal log saved: {selected}")
+
     def _close(self) -> None:
         self.cancel_inference.set()
         self.resume_activity.set()
         self._close_preprocess_popup()
         self._close_annotation_popup()
+        self._close_threshold_popup()
         self.destroy()
 
 

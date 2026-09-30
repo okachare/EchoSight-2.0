@@ -8,7 +8,14 @@ from PIL import Image
 
 from echosight2.desktop import EchoSightApp
 from echosight2.frames import LoadedFrame
-from echosight2.inference import Classification, Detection, InferenceResult, TaskType
+from echosight2.inference import (
+    ChainedInferenceEngine,
+    Classification,
+    Detection,
+    InferenceEngine,
+    InferenceResult,
+    TaskType,
+)
 from echosight2.rendering import RenderOptions
 from echosight2.training import TrainingExport
 
@@ -52,6 +59,37 @@ def test_chained_result_metrics_use_upstream_detection_confidence() -> None:
     assert EchoSightApp._confidence_text(1.0) == ">=99.99%"
 
 
+def test_threshold_override_applies_per_stage_and_resets_to_model_defaults() -> None:
+    app = object.__new__(EchoSightApp)
+    detector_info = Mock(confidence_threshold=0.6, task_type=TaskType.DETECTION)
+    classifier_info = Mock(confidence_threshold=0.5, task_type=TaskType.CLASSIFICATION)
+    detector = Mock(spec=InferenceEngine, confidence_threshold=0.6)
+    classifier = Mock(spec=InferenceEngine, confidence_threshold=0.5)
+    app.inference_engine = Mock(spec=ChainedInferenceEngine, detector=detector, classifier=classifier)
+    app.model_infos = (detector_info, classifier_info)
+    app.results = {0: _result(0.91)}
+    app.inference_failures = {1: "failed"}
+    app.hidden_annotations = {0: {1}}
+    app._clear_results_ui = Mock()
+    app._refresh_model_detail = Mock()
+    app._log = Mock()
+    app._close_threshold_popup = Mock()
+    app._update_run_state = Mock()
+
+    app._set_effective_thresholds((0.1, 0.25))
+
+    assert detector.confidence_threshold == 0.1
+    assert classifier.confidence_threshold == 0.25
+    assert app._threshold_override_active()
+    assert app.results == {}
+    assert app.inference_failures == {}
+    assert app.hidden_annotations == {}
+
+    app._set_effective_thresholds((0.6, 0.5))
+
+    assert not app._threshold_override_active()
+
+
 def test_current_export_payload_excludes_other_results_and_failures() -> None:
     app = object.__new__(EchoSightApp)
     app.current_result_index = 2
@@ -74,6 +112,85 @@ def test_all_export_payload_preserves_results_and_failures() -> None:
 
     assert results == app.results
     assert failures == app.inference_failures
+
+
+def test_clear_model_retains_images_and_clears_model_results() -> None:
+    app = object.__new__(EchoSightApp)
+    app.inference_running = False
+    app.export_running = False
+    app.model_info = Mock()
+    app.model_path = Path("model.xml")
+    app.model_parent = Path("model")
+    app.model_infos = (Mock(),)
+    app.inference_engine = Mock()
+    app.model_detail_base = "details"
+    app.frames = [Mock()]
+    app.results = {0: _result(0.91)}
+    app.inference_failures = {1: "failed"}
+    app.hidden_annotations = {0: {1}}
+    app.threshold_override_enabled = Mock()
+    app.threshold_variables = [Mock()]
+    app.model_name = Mock()
+    app.status_text = Mock()
+    app._close_threshold_popup = Mock()
+    app._set_model_detail = Mock()
+    app._clear_results_ui = Mock()
+    app._log = Mock()
+    app._update_run_state = Mock()
+
+    app._clear_model()
+
+    assert app.frames
+    assert app.model_info is None
+    assert app.inference_engine is None
+    assert app.results == {}
+    assert app.inference_failures == {}
+    app.model_name.set.assert_called_once_with("No model loaded")
+
+
+def test_clear_images_retains_model_and_clears_frame_state() -> None:
+    app = object.__new__(EchoSightApp)
+    app.inference_running = False
+    app.export_running = False
+    app.model_info = Mock()
+    app.frames = [Mock()]
+    app.results = {0: _result(0.91)}
+    app.inference_failures = {1: "failed"}
+    app.hidden_annotations = {0: {1}}
+    app.preprocess_profiles = {0: (1.0, 1.0, 1.0, 0.0)}
+    app.annotation_profiles = {0: RenderOptions()}
+    app.annotation_variables = [Mock()]
+    app.current_analysis_index = 0
+    app.current_result_index = 0
+    app.image_list = Mock()
+    app.analysis_canvas = Mock()
+    app.status_text = Mock()
+    app._clear_results_ui = Mock()
+    app._load_preprocess_profile = Mock()
+    app._log = Mock()
+    app._update_run_state = Mock()
+
+    app._clear_images()
+
+    assert app.model_info is not None
+    assert app.frames == []
+    assert app.results == {}
+    assert app.preprocess_profiles == {}
+    app.analysis_canvas.set_image.assert_called_once_with(None)
+
+
+def test_save_terminal_log_writes_visible_session_text(tmp_path: Path) -> None:
+    app = object.__new__(EchoSightApp)
+    destination = tmp_path / "terminal.log"
+    app.terminal = Mock(get=Mock(return_value="12:00:00 | session started"))
+    app.status_text = Mock()
+    app._log = Mock()
+
+    with patch("echosight2.desktop.filedialog.asksaveasfilename", return_value=str(destination)):
+        app._save_terminal_log()
+
+    assert destination.read_text(encoding="utf-8") == "12:00:00 | session started\n"
+    app._log.assert_called_once_with(f"Terminal log saved | {destination}")
 
 
 def test_pause_gate_blocks_until_resume() -> None:

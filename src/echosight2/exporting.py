@@ -45,6 +45,7 @@ def export_run(
     frame_image_transform: Callable[[Image.Image, int], Image.Image] | None = None,
     progress: Callable[[int, int, str], None] | None = None,
     pipeline_model_infos: tuple[ModelInfo, ...] = (),
+    effective_confidence_thresholds: tuple[float, ...] = (),
 ) -> ExportReport:
     """Write annotated images, flat CSV results, and a reproducible JSON manifest."""
     if not results and not failures:
@@ -100,8 +101,19 @@ def export_run(
         "schema_version": 1,
         "application": {"name": "EchoSight", "version": __version__},
         "exported_at": timestamp.isoformat(),
-        "model": _model_record(model_info, model_parent),
-        "pipeline_models": [_model_record(info, model_parent) for info in pipeline_model_infos],
+        "model": _model_record(
+            model_info,
+            model_parent,
+            effective_confidence_thresholds[0] if effective_confidence_thresholds else None,
+        ),
+        "pipeline_models": [
+            _model_record(
+                info,
+                model_parent,
+                effective_confidence_thresholds[index] if index < len(effective_confidence_thresholds) else None,
+            )
+            for index, info in enumerate(pipeline_model_infos)
+        ],
         "processing": {
             "user_preprocessing": preprocessing,
             "model_preprocessing": _model_preprocessing(model_info),
@@ -135,8 +147,13 @@ def _unique_run_directory(destination: Path, timestamp: datetime) -> Path:
     return candidate
 
 
-def _model_record(info: ModelInfo, model_parent: Path | None) -> dict[str, Any]:
+def _model_record(
+    info: ModelInfo,
+    model_parent: Path | None,
+    effective_confidence_threshold: float | None = None,
+) -> dict[str, Any]:
     weights_path = info.path.with_suffix(".bin") if info.path.suffix.lower() == ".xml" else None
+    effective_threshold = info.confidence_threshold if effective_confidence_threshold is None else effective_confidence_threshold
     return {
         "package_folder": str(model_parent.resolve()) if model_parent else None,
         "artifact": str(info.path),
@@ -149,6 +166,8 @@ def _model_record(info: ModelInfo, model_parent: Path | None) -> dict[str, Any]:
         "model_type": info.model_type,
         "labels": list(info.labels),
         "confidence_threshold": info.confidence_threshold,
+        "effective_confidence_threshold": effective_threshold,
+        "confidence_threshold_overridden": abs(effective_threshold - info.confidence_threshold) > 1e-9,
         "training_date": info.training_date,
         "artifact_date": info.artifact_date,
         "inputs": [_tensor_record(item) for item in info.inputs],

@@ -24,9 +24,17 @@ Double-click `Launch_EchoSight.bat` in the shared folder. Run `SETUP.ps1` again 
 5. Review generated output in the **Results** tab.
 6. Use the overlay and annotation checkboxes to control exported visibility.
 
+Use **Clear Model** to unload the current model while retaining loaded images. Use **Clear Images** to remove loaded images and their results while retaining the compiled model. Both actions clear results that can no longer be valid.
+
 Supported inputs are PNG, JPEG, BMP, WebP, TIFF, and multi-frame TIFF.
 
 For a Geti chained deployment, select the package folder above `deployment/project.json`. EchoSight currently supports the explicit **Detection -> Crop -> Classification** graph. Each detected box is cropped and passed to the classifier. Results shows the teal detection annotation first, followed by separate class-colored classification annotations with independent confidence values and visibility checkboxes. The frame list's highest-confidence column uses upstream detection confidence for chained results. Both stages and thresholds appear in Model Information, and both model artifacts are recorded in the run manifest.
+
+### Advanced threshold review
+
+The model's embedded threshold is used during normal operation. To investigate whether subtle defects produce weak candidates, select the small dropdown at the lower-right of **Model Information**, enable **Override model confidence threshold**, adjust the stage-specific slider, and select **Apply override**. Read and confirm the warning before proceeding. Existing results are cleared and inference must be rerun. An active override is shown in Model Information, the Terminal, and Results under **Annotations**. Use **Reset to model defaults** when the review is complete. Overrides are session-only and exports record both embedded and effective thresholds.
+
+Lower thresholds can generate many false or duplicate detections. A weak candidate suggests the model noticed a feature with low confidence; it does not establish that the defect is real. If no useful candidate appears at a low threshold, the model may have missed or internally suppressed it.
 
 For oversized single-frame JPEGs and compatible uncompressed 8-bit TIFFs, EchoSight creates a memory-bounded working image of at most 16 megapixels. The source remains unchanged, and the image list, Terminal, CSV, and run manifest identify the optimization and original/working dimensions. Because the model analyzes the reduced full scene, split or tile a very large image when defects may be too small to survive whole-image scaling.
 
@@ -68,6 +76,8 @@ The export reflects the active preprocessing, overlay switches, and per-annotati
 A failure on one frame does not stop **Run All**. Successful frames remain available and the failed frame is recorded in the exported CSV and manifest.
 
 Review the on-screen **Terminal** and the dated file under `%LOCALAPPDATA%\EchoSight\2.0\logs` for details. Preserve the exported run folder when escalating a model or image issue.
+
+Select **Save Terminal Log** at the lower-right of the Terminal panel to save the currently visible session text as a UTF-8 `.log` or `.txt` file in a chosen location.
 
 ## Diagnostics
 

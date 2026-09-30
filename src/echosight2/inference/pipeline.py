@@ -115,9 +115,8 @@ class ChainedInferenceEngine:
         threshold = self.classifier.confidence_threshold
         metadata = dict(self.classifier.model_info.metadata)
         if metadata.get("hierarchical", "false").lower() != "true":
-            return result.classifications[:1]
-        selected = tuple(item for item in result.classifications if item.confidence >= threshold)
-        return selected or result.classifications[:1]
+            return tuple(item for item in result.classifications[:1] if item.confidence >= threshold)
+        return tuple(item for item in result.classifications if item.confidence >= threshold)
 
     @staticmethod
     def _crop(image: Image.Image, box: tuple[float, float, float, float]) -> Image.Image | None:

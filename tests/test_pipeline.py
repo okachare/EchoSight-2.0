@@ -65,6 +65,31 @@ def test_chained_engine_classifies_each_detected_crop() -> None:
     assert classification.confidence == pytest.approx(0.82)
     assert classification.detector_confidence == pytest.approx(0.91)
     assert detection.roi_index == classification.roi_index == 1
+
+
+def test_chained_engine_filters_classification_below_effective_threshold() -> None:
+    detector = Mock(model_info=_info(TaskType.DETECTION))
+    detector.infer.return_value = InferenceResult(
+        source=None,
+        task_type=TaskType.DETECTION,
+        image_size=(100, 80),
+        input_size=(32, 32),
+        duration_ms=4.0,
+        detections=(Detection(0, "Anomaly", 0.91, (10.2, 20.4, 50.1, 60.9)),),
+    )
+    classifier = Mock(model_info=_info(TaskType.CLASSIFICATION), confidence_threshold=0.5)
+    classifier.infer.return_value = InferenceResult(
+        source=None,
+        task_type=TaskType.CLASSIFICATION,
+        image_size=(41, 41),
+        input_size=(32, 32),
+        duration_ms=2.0,
+        classifications=(Classification(0, "Delamination", 0.49),),
+    )
+
+    result = ChainedInferenceEngine(detector, classifier).infer(Image.new("RGB", (100, 80)))
+
+    assert [item.stage for item in result.detections] == ["detection"]
     assert classifier.infer.call_args.args[0].size == (41, 41)
 
 

@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Memory-bounded loading for oversized JPEG and compatible uncompressed 8-bit TIFF images, retaining a working image of at most 16 megapixels while preserving source dimensions in exports.
 - Explicit Geti **Detection -> Crop -> Classification** pipeline support driven by `deployment/project.json`.
 - Stage-aware chained annotations with detector-first ordering, distinct colors, independent confidence values and visibility controls, and collision-aware labels.
+- A guarded, session-only confidence-threshold override hidden behind the Model Information dropdown, with independent stage controls for chained models.
+- Side-by-side **Clear Model** and **Clear Images** controls that preserve the unaffected resource and remove dependent results safely.
+- A themed **Save Terminal Log** action for exporting the visible session log to a user-selected UTF-8 file.
 
 ### Changed
 - Renamed **Load Model Folder** to **Load Model**.
@@ -27,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Updated exports and manifests to retain each frame's applied preprocessing and annotation-rendering settings.
 - Ranked chained results by upstream detection confidence while preserving each detector and classifier confidence independently in the UI and exports.
 - Recorded pipeline model hashes plus annotation stage and ROI identity in run evidence.
+- Added active-override warnings to Model Information, Terminal, and Results, and recorded embedded and effective thresholds in run manifests.
 
 ### Fixed
 - Preserved multi-row Results selections during list refreshes so batch False Hit and Miss exports remain reliable.
@@ -36,7 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prevented annotation labels from obscuring one another when chained ROIs are closely spaced.
 
 ### Validated
-- All 51 automated tests pass, including giant-image loading, chained inference, stage-aware rendering, desktop workflow, exports, and retraining safeguards.
+- All 56 automated tests pass, including giant-image loading, chained inference, stage-aware rendering, resource clearing, Terminal log export, desktop workflow, exports, and retraining safeguards.
 - The Results image panel receives the dominant width in a real 3840-pixel Tk layout check.
 - The real `NCL_S_ChainedModel_Test` package compiled both models, produced three detector ROIs, classified every crop, rendered 12 ordered stage annotations, and preserved both model hashes in exports.
 
