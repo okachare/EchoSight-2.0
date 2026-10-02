@@ -101,3 +101,19 @@ def test_label_layout_avoids_overlapping_stage_labels() -> None:
 
     candidate = (25, y, 95, y + 15)
     assert not rendering._rectangles_overlap(candidate, occupied[0])
+
+def test_scales_full_resolution_detection_to_preview() -> None:
+    source = Image.new("RGB", (100, 50), "black")
+    detection = Detection(0, "Defect", 0.9, (500.0, 250.0, 1000.0, 500.0))
+    result = InferenceResult(
+        source=Path("wafer.tiff"),
+        task_type=TaskType.DETECTION,
+        image_size=(1000, 500),
+        input_size=(100, 100),
+        duration_ms=1.0,
+        detections=(detection,),
+    )
+
+    rendered = np.asarray(render_result(source, result, RenderOptions(show_labels=False)))
+
+    assert tuple(rendered[25, 50]) != (0, 0, 0)

@@ -4,7 +4,7 @@ import pytest
 from PIL import Image
 
 import echosight2.frames as frame_module
-from echosight2.frames import load_frames
+from echosight2.frames import iter_frame_tiles, load_frames
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
 MULTIFRAME_TIFF = WORKSPACE_ROOT / "TiffSplitter" / "samples" / "ARL_Test.TIFF"
@@ -57,4 +57,35 @@ def test_optimizes_oversized_uncompressed_palette_tiff(tmp_path: Path, monkeypat
     assert frames[0].image.size == (50, 50)
     assert frames[0].image.mode == "RGB"
     assert frames[0].is_optimized
-    assert "Optimized 50x50 from 100x100" in frames[0].display_name
+    assert "Full-resolution tiled inference 100x100" in frames[0].display_name
+
+
+def test_oversized_tiff_tiles_preserve_every_source_pixel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "oversized.tiff"
+    values = bytes(range(100))
+    Image.frombytes("L", (10, 10), values).save(path, compression="raw")
+    monkeypatch.setattr(frame_module, "MAX_WORKING_PIXELS", 25)
+    frame = load_frames(path)[0]
+
+    tiles = list(iter_frame_tiles(frame, (4, 4), overlap=0.25))
+    coverage = Image.new("L", frame.original_size, 0)
+    reconstructed = Image.new("L", frame.original_size)
+    for tile in tiles:
+        reconstructed.paste(tile.image.convert("L"), tile.box[:2])
+        coverage.paste(1, tile.box)
+
+    assert frame.image.size == (5, 5)
+    assert min(coverage.getdata()) == 1
+    assert reconstructed.tobytes() == values
+
+
+def test_oversized_jpeg_is_rejected_before_lossy_preview_inference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "oversized.jpg"
+    Image.new("RGB", (100, 100), "black").save(path)
+    monkeypatch.setattr(frame_module, "MAX_WORKING_PIXELS", 2_500)
+
+    with pytest.raises(ValueError, match="Full-resolution bounded inference requires"):
+        load_frames(path)

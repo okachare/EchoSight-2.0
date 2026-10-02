@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import defaultdict
+from dataclasses import dataclass, replace
+from functools import lru_cache
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
@@ -44,7 +46,7 @@ def render_result(
     options = options or RenderOptions()
     hidden = hidden_annotations or set()
     rendered = source.convert("RGB").copy()
-    occupied_labels: list[tuple[int, int, int, int]] = []
+    occupied_labels = _LabelOccupancy()
 
     if result.task_type is TaskType.ANOMALY and result.anomaly_map is not None and options.show_heatmap and 0 not in hidden:
         rendered = _render_anomaly_map(rendered, result.anomaly_map, options.overlay_opacity)
@@ -52,7 +54,7 @@ def render_result(
     for index, detection in enumerate(result.detections):
         if index in hidden:
             continue
-        rendered = _render_detection(rendered, detection, options, occupied_labels)
+        rendered = _render_detection(rendered, _scale_detection(detection, result.image_size, rendered.size), options, occupied_labels)
 
     if options.show_labels and result.task_type is TaskType.ANOMALY and result.anomaly_score is not None and 0 not in hidden:
         color = options.annotation_color or COLORS[3]
@@ -60,12 +62,31 @@ def render_result(
 
     return rendered
 
+def _scale_detection(
+    detection: Detection,
+    result_size: tuple[int, int],
+    render_size: tuple[int, int],
+) -> Detection:
+    if result_size == render_size or result_size[0] < 1 or result_size[1] < 1:
+        return detection
+    scale_x = render_size[0] / result_size[0]
+    scale_y = render_size[1] / result_size[1]
+    return replace(
+        detection,
+        box=(
+            detection.box[0] * scale_x,
+            detection.box[1] * scale_y,
+            detection.box[2] * scale_x,
+            detection.box[3] * scale_y,
+        ),
+    )
+
 
 def _render_detection(
     image: Image.Image,
     detection: Detection,
     options: RenderOptions,
-    occupied_labels: list[tuple[int, int, int, int]] | None = None,
+    occupied_labels: _LabelOccupancy | None = None,
 ) -> Image.Image:
     rendered = image
     if options.annotation_color is not None:
@@ -121,6 +142,9 @@ def _draw_box(
 ) -> Image.Image:
     alpha = round(255 * float(np.clip(opacity, 0.0, 1.0)))
     if alpha == 0:
+        return image
+    if alpha == 255:
+        ImageDraw.Draw(image).rectangle(box, outline=color, width=max(1, int(thickness)))
         return image
     overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
     ImageDraw.Draw(overlay).rectangle(box, outline=(*color, alpha), width=max(1, int(thickness)))
@@ -188,7 +212,7 @@ def _draw_label(
     color: tuple[int, int, int],
     options: RenderOptions,
     above: bool = False,
-    occupied: list[tuple[int, int, int, int]] | None = None,
+    occupied: list[tuple[int, int, int, int]] | _LabelOccupancy | None = None,
 ) -> Image.Image:
     alpha = round(255 * float(np.clip(options.label_opacity, 0.0, 1.0)))
     if alpha == 0:
@@ -203,7 +227,13 @@ def _draw_label(
     y = min(max(0, requested_y), max(0, image.size[1] - height))
     if occupied is not None:
         y = _available_label_y(x, y, width, height, image.size[1], occupied)
-        occupied.append((x, y, x + width, y + height))
+        rectangle = (x, y, x + width, y + height)
+        occupied.add(rectangle) if isinstance(occupied, _LabelOccupancy) else occupied.append(rectangle)
+    if alpha == 255:
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((x, y, x + width, y + height), fill=(12, 16, 20), outline=color)
+        draw.text((x + 4, y + 4), text, fill=(240, 245, 248), font=font)
+        return image
     overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     draw.rectangle((x, y, x + width, y + height), fill=(12, 16, 20, alpha), outline=(*color, alpha))
@@ -217,22 +247,50 @@ def _available_label_y(
     width: int,
     height: int,
     image_height: int,
-    occupied: list[tuple[int, int, int, int]],
+    occupied: list[tuple[int, int, int, int]] | _LabelOccupancy,
 ) -> int:
     maximum_y = max(0, image_height - height)
     step = height + 2
     candidates = range(requested_y, maximum_y + 1, step)
     for y in (*candidates, *range(requested_y - step, -1, -step)):
         candidate = (x, y, x + width, y + height)
-        if not any(_rectangles_overlap(candidate, existing) for existing in occupied):
+        overlaps = occupied.overlaps(candidate) if isinstance(occupied, _LabelOccupancy) else any(
+            _rectangles_overlap(candidate, existing) for existing in occupied
+        )
+        if not overlaps:
             return y
     return requested_y
+
+
+class _LabelOccupancy:
+    def __init__(self, cell_size: int = 64) -> None:
+        self.cell_size = cell_size
+        self.rectangles: list[tuple[int, int, int, int]] = []
+        self.buckets: dict[tuple[int, int], list[int]] = defaultdict(list)
+
+    def add(self, rectangle: tuple[int, int, int, int]) -> None:
+        index = len(self.rectangles)
+        self.rectangles.append(rectangle)
+        for cell in self._cells(rectangle):
+            self.buckets[cell].append(index)
+
+    def overlaps(self, rectangle: tuple[int, int, int, int]) -> bool:
+        indexes = {index for cell in self._cells(rectangle) for index in self.buckets[cell]}
+        return any(_rectangles_overlap(rectangle, self.rectangles[index]) for index in indexes)
+
+    def _cells(self, rectangle: tuple[int, int, int, int]) -> list[tuple[int, int]]:
+        left, top, right, bottom = rectangle
+        first_x, first_y = left // self.cell_size, top // self.cell_size
+        last_x = max(left, right - 1) // self.cell_size
+        last_y = max(top, bottom - 1) // self.cell_size
+        return [(x, y) for y in range(first_y, last_y + 1) for x in range(first_x, last_x + 1)]
 
 
 def _rectangles_overlap(first: tuple[int, int, int, int], second: tuple[int, int, int, int]) -> bool:
     return first[0] < second[2] and first[2] > second[0] and first[1] < second[3] and first[3] > second[1]
 
 
+@lru_cache(maxsize=32)
 def _load_label_font(family: str, size: int) -> ImageFont.ImageFont | ImageFont.FreeTypeFont:
     requested_size = max(1, int(size))
     candidates = (f"{family}.ttf", "calibri.ttf", "arial.ttf")

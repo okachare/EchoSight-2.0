@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import queue
+import sys
 import threading
 import tkinter as tk
 from dataclasses import replace
@@ -23,12 +25,15 @@ from .inference import (
     ModelInfo,
     ModelLoader,
     discover_detection_classification_chain,
+    infer_frame,
 )
 from .rendering import RenderOptions, render_result
 from .runtime import log_directory
 from .training import export_training_frames
 
 LOGGER = logging.getLogger(__name__)
+ANNOTATIONS_PER_PAGE = 100
+MAX_CANVAS_ZOOM = 1024.0
 
 
 class FitImageCanvas(tk.Canvas):
@@ -66,7 +71,7 @@ class FitImageCanvas(tk.Canvas):
             return "break"
         step = direction if direction is not None else (1 if event.delta > 0 else -1)
         previous = self.zoom
-        self.zoom = min(8.0, max(0.25, self.zoom * (1.15 if step > 0 else 1 / 1.15)))
+        self.zoom = min(MAX_CANVAS_ZOOM, max(0.25, self.zoom * (1.2 if step > 0 else 1 / 1.2)))
         ratio = self.zoom / previous
         center_x = self.winfo_width() / 2
         center_y = self.winfo_height() / 2
@@ -102,12 +107,40 @@ class FitImageCanvas(tk.Canvas):
         height = max(1, self.winfo_height() - 32)
         fit_scale = min(width / self.source_image.width, height / self.source_image.height)
         scale = fit_scale * self.zoom
-        preview = self.source_image.resize(
-            (max(1, round(self.source_image.width * scale)), max(1, round(self.source_image.height * scale))),
-            Image.Resampling.LANCZOS,
+        display_width = max(1, round(self.source_image.width * scale))
+        display_height = max(1, round(self.source_image.height * scale))
+        image_left = self.winfo_width() / 2 + self.pan_x - display_width / 2
+        image_top = self.winfo_height() / 2 + self.pan_y - display_height / 2
+        visible_left = max(0, round(image_left))
+        visible_top = max(0, round(image_top))
+        visible_right = min(self.winfo_width(), round(image_left + display_width))
+        visible_bottom = min(self.winfo_height(), round(image_top + display_height))
+        if visible_right <= visible_left or visible_bottom <= visible_top:
+            self.photo = None
+            return
+        source_box = (
+            max(0, int((visible_left - image_left) / scale)),
+            max(0, int((visible_top - image_top) / scale)),
+            min(self.source_image.width, max(1, int((visible_right - image_left) / scale + 1))),
+            min(self.source_image.height, max(1, int((visible_bottom - image_top) / scale + 1))),
+        )
+        preview = self.source_image.crop(source_box).resize(
+            (visible_right - visible_left, visible_bottom - visible_top),
+            Image.Resampling.NEAREST if scale >= 1.0 else Image.Resampling.LANCZOS,
         )
         self.photo = ImageTk.PhotoImage(preview)
-        self.create_image(self.winfo_width() / 2 + self.pan_x, self.winfo_height() / 2 + self.pan_y, image=self.photo)
+        self.create_image(visible_left, visible_top, image=self.photo, anchor="nw")
+
+
+class ReadOnlyText(tk.Text):
+    """Scrollable text surface retaining the StringVar-like set API."""
+
+    def set(self, value: str) -> None:
+        self.configure(state="normal")
+        self.delete("1.0", tk.END)
+        self.insert("1.0", value)
+        self.configure(state="disabled")
+        self.yview_moveto(0.0)
 
 
 class ActivityIndicator(tk.Canvas):
@@ -160,15 +193,26 @@ class EchoSightApp(tk.Tk):
         self.model_info: ModelInfo | None = None
         self.model_infos: tuple[ModelInfo, ...] = ()
         self.inference_engine: InferenceEngine | ChainedInferenceEngine | None = None
+        self.inference_engines: tuple[InferenceEngine | ChainedInferenceEngine, ...] = ()
+        self.pipeline_model_infos: tuple[tuple[ModelInfo, ...], ...] = ()
+        self.model_parents: tuple[Path, ...] = ()
         self.frames: list[LoadedFrame] = []
         self.results: dict[int, InferenceResult] = {}
+        self.secondary_results: dict[int, InferenceResult] = {}
         self.inference_failures: dict[int, str] = {}
+        self.secondary_inference_failures: dict[int, str] = {}
         self.current_analysis_index: int | None = None
         self.current_result_index: int | None = None
         self.hidden_annotations: dict[int, set[int]] = {}
+        self.secondary_hidden_annotations: dict[int, set[int]] = {}
         self.preprocess_profiles: dict[int, tuple[float, float, float, float]] = {}
         self.annotation_profiles: dict[int, RenderOptions] = {}
         self.annotation_variables: list[tk.BooleanVar] = []
+        self.annotation_page = 0
+        self.result_render_generation = 0
+        self.result_render_running = False
+        self.pending_result_render: tuple[object, ...] | None = None
+        self.result_render_events: queue.Queue[tuple[int, int, Image.Image | None, Image.Image | None]] = queue.Queue()
         self.result_sort_column = "frame"
         self.result_sort_descending = False
         self.preprocess_popup: tk.Toplevel | None = None
@@ -207,7 +251,27 @@ class EchoSightApp(tk.Tk):
         self._log("EchoSight 2.0 session started")
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.bind_all("<Button-1>", self._dismiss_popups, add="+")
+        self.after_idle(self._enable_dark_title_bar)
         self.after_idle(self._maximize_window)
+
+    def _enable_dark_title_bar(self) -> None:
+        if sys.platform != "win32":
+            return
+        try:
+            enabled = ctypes.c_int(1)
+            get_parent = ctypes.windll.user32.GetParent
+            get_parent.argtypes = [ctypes.c_void_p]
+            get_parent.restype = ctypes.c_void_p
+            set_attribute = ctypes.windll.dwmapi.DwmSetWindowAttribute
+            set_attribute.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint]
+            set_attribute.restype = ctypes.c_long
+            child_handle = self.winfo_id()
+            window_handle = get_parent(child_handle) or child_handle
+            result = set_attribute(window_handle, 20, ctypes.byref(enabled), ctypes.sizeof(enabled))
+            if result != 0:
+                set_attribute(window_handle, 19, ctypes.byref(enabled), ctypes.sizeof(enabled))
+        except (AttributeError, OSError):
+            LOGGER.debug("Windows dark title bar is unavailable", exc_info=True)
 
     def _maximize_window(self) -> None:
         try:
@@ -289,6 +353,14 @@ class EchoSightApp(tk.Tk):
         actions.pack(fill="x", pady=(0, 10))
         self.load_model_button = ttk.Button(actions, text="Load Model", style="Load.TButton", command=self._select_model)
         self.load_model_button.pack(fill="x")
+        self.add_model_button = ttk.Button(
+            actions,
+            text="Add Model",
+            style="Tool.TButton",
+            state="disabled",
+            command=self._select_additional_model,
+        )
+        self.add_model_button.pack(fill="x", pady=(6, 0))
         self.open_images_button = ttk.Button(actions, text="Open Images", style="Tool.TButton", command=self._select_images)
         self.open_images_button.pack(fill="x", pady=(6, 0))
         clear_row = ttk.Frame(actions, style="Panel.TFrame")
@@ -479,8 +551,19 @@ class EchoSightApp(tk.Tk):
         result_vertical.pack(side="right", fill="y")
         result_horizontal.pack(side="bottom", fill="x")
         self.result_list.bind("<<TreeviewSelect>>", self._show_result_selection)
-        self.results_canvas = FitImageCanvas(result_viewer)
+        self.result_viewers = ttk.Panedwindow(result_viewer, orient="horizontal")
+        self.result_viewers.pack(fill="both", expand=True)
+        self.primary_result_panel = ttk.Frame(self.result_viewers, style="Panel.TFrame")
+        self.secondary_result_panel = ttk.Frame(self.result_viewers, style="Panel.TFrame")
+        self.result_viewers.add(self.primary_result_panel, weight=1)
+        self.primary_result_title = ttk.Label(self.primary_result_panel, text="MODEL 1", style="PanelTitle.TLabel")
+        self.primary_result_title.pack(anchor="w", padx=8, pady=(5, 0))
+        self.results_canvas = FitImageCanvas(self.primary_result_panel)
         self.results_canvas.pack(fill="both", expand=True)
+        self.secondary_result_title = ttk.Label(self.secondary_result_panel, text="MODEL 2", style="PanelTitle.TLabel")
+        self.secondary_result_title.pack(anchor="w", padx=8, pady=(5, 0))
+        self.secondary_results_canvas = FitImageCanvas(self.secondary_result_panel)
+        self.secondary_results_canvas.pack(fill="both", expand=True)
         self.annotation_style_button = ttk.Button(
             result_viewer,
             text="\U0001f3a8",
@@ -491,8 +574,27 @@ class EchoSightApp(tk.Tk):
         self.annotation_style_button.place(relx=1.0, rely=1.0, x=-18, y=-18, anchor="se")
 
         ttk.Label(detail_panel, text="RESULT DETAILS", style="PanelTitle.TLabel").pack(anchor="w")
-        self.result_text = tk.StringVar(value="Run inference in Analysis to populate results.")
-        ttk.Label(detail_panel, textvariable=self.result_text, style="PanelText.TLabel", wraplength=295, justify="left").pack(anchor="w", pady=(8, 12))
+        result_detail_area = ttk.Frame(detail_panel, style="Panel.TFrame")
+        result_detail_area.pack(fill="x", pady=(8, 12))
+        self.result_text = ReadOnlyText(
+            result_detail_area,
+            height=10,
+            wrap="word",
+            background="#222222",
+            foreground="#d6dadd",
+            insertbackground="#d6dadd",
+            relief="flat",
+            borderwidth=0,
+            padx=4,
+            pady=4,
+            font=("Segoe UI", 9),
+            state="disabled",
+        )
+        result_detail_scrollbar = ttk.Scrollbar(result_detail_area, orient="vertical", command=self.result_text.yview)
+        self.result_text.configure(yscrollcommand=result_detail_scrollbar.set)
+        self.result_text.pack(side="left", fill="both", expand=True)
+        result_detail_scrollbar.pack(side="right", fill="y")
+        self.result_text.set("Run inference in Analysis to populate results.")
         ttk.Label(detail_panel, text="OVERLAYS", style="PanelTitle.TLabel").pack(anchor="w")
         for text, variable in (("Bounding boxes", self.show_boxes), ("Labels", self.show_labels), ("Instance masks", self.show_masks), ("Anomaly heatmap", self.show_heatmap)):
             ttk.Checkbutton(detail_panel, text=text, variable=variable, command=self._refresh_annotation_views, style="Panel.TCheckbutton").pack(anchor="w")
@@ -679,6 +781,15 @@ class EchoSightApp(tk.Tk):
         return tk.Listbox(parent, background="#1b1b1b", foreground="#d5d9dc", selectbackground="#315342", selectforeground="#ffffff", borderwidth=0, highlightthickness=0, activestyle="none", font=("Segoe UI Variable Text", 9), exportselection=False, selectmode="extended")
 
     def _select_model(self) -> None:
+        self._select_model_package(append=False)
+
+    def _select_additional_model(self) -> None:
+        self._select_model_package(append=True)
+
+    def _select_model_package(self, append: bool) -> None:
+        if append and len(self.inference_engines) >= 2:
+            messagebox.showinfo("Model limit", "EchoSight supports up to two model packages at a time.")
+            return
         selected = filedialog.askdirectory(title="Select trained model parent folder", mustexist=True)
         if not selected:
             return
@@ -702,29 +813,37 @@ class EchoSightApp(tk.Tk):
             messagebox.showerror("Multiple models found", message)
             return
         paths = chain_paths or (models[0],)
-        self.model_path = None
-        self.model_parent = parent
-        self.model_info = None
-        self.model_infos = ()
-        self.inference_engine = None
+        if not append:
+            self.model_path = None
+            self.model_parent = parent
+            self.model_info = None
+            self.model_infos = ()
+            self.inference_engine = None
+            self.inference_engines = ()
+            self.pipeline_model_infos = ()
+            self.model_parents = ()
         self.threshold_override_enabled.set(False)
         self.threshold_variables.clear()
         self._close_threshold_popup()
         self.threshold_button.configure(state="disabled")
         self.results.clear()
+        self.secondary_results.clear()
         self.inference_failures.clear()
+        self.secondary_inference_failures.clear()
+        self.hidden_annotations.clear()
+        self.secondary_hidden_annotations.clear()
         self._clear_results_ui()
-        self.model_name.set(parent.name)
+        self.model_name.set(f"Adding {parent.name}..." if append else parent.name)
         self._set_model_detail("Reading model metadata and preparing CPU compilation...")
         self._set_activity(f"Reading {'chained models' if len(paths) > 1 else 'model'}", True)
         self.load_model_button.configure(state="disabled")
         self._log(f"Model folder: {parent}")
         for path in paths:
             self._log(f"Discovered model: {path.relative_to(parent.resolve())}")
-        threading.Thread(target=self._model_worker, args=(paths, parent), daemon=True).start()
+        threading.Thread(target=self._model_worker, args=(paths, parent, append, chain_paths is not None), daemon=True).start()
         self.after(100, self._poll_model)
 
-    def _model_worker(self, paths: tuple[Path, ...], parent: Path) -> None:
+    def _model_worker(self, paths: tuple[Path, ...], parent: Path, append: bool, chained: bool) -> None:
         try:
             loader = ModelLoader()
             loaded = []
@@ -734,7 +853,7 @@ class EchoSightApp(tk.Tk):
                 self.model_events.put(("progress", f"Compiling stage {position}/{len(paths)} | {info.model_type or info.task_type.value}"))
                 model = loader.core.read_model(info.path)
                 loaded.append((info, loader.core.compile_model(model, loader.device)))
-            self.model_events.put(("loaded", tuple(loaded)))
+            self.model_events.put(("loaded", (tuple(loaded), parent, append, chained)))
         except Exception as error:
             LOGGER.exception("Model loading failed")
             self.model_events.put(("error", error))
@@ -753,17 +872,34 @@ class EchoSightApp(tk.Tk):
         self.load_model_button.configure(state="normal")
         self._set_activity("Ready", False)
         if event == "error":
-            self.model_name.set("No model loaded")
+            self.model_name.set(" + ".join(item.name for item in self.model_parents) or "No model loaded")
             self._set_model_detail("Model loading failed. See Terminal and application log.")
             self._log(f"ERROR | Model loading failed: {payload}")
             messagebox.showerror("Model loading error", str(payload))
             return
-        loaded = payload
-        self.model_infos = tuple(info for info, _compiled in loaded)
+        loaded, parent, append, chained = payload
+        loaded_infos = tuple(info for info, _compiled in loaded)
+        loaded_engines = tuple(InferenceEngine(info, compiled) for info, compiled in loaded)
+        pipeline_engine: InferenceEngine | ChainedInferenceEngine
+        if chained:
+            pipeline_engine = ChainedInferenceEngine(loaded_engines[0], loaded_engines[1])
+        else:
+            pipeline_engine = loaded_engines[0]
+        if append:
+            self.inference_engines = (*self.inference_engines, pipeline_engine)
+            self.pipeline_model_infos = (*self.pipeline_model_infos, loaded_infos)
+            self.model_parents = (*self.model_parents, parent)
+        else:
+            self.inference_engines = (pipeline_engine,)
+            self.pipeline_model_infos = (loaded_infos,)
+            self.model_parents = (parent,)
+        self.model_infos = tuple(info for group in self.pipeline_model_infos for info in group)
         self.model_info = self.model_infos[0]
-        engines = tuple(InferenceEngine(info, compiled) for info, compiled in loaded)
         self.model_path = self.model_info.path
-        self.inference_engine = ChainedInferenceEngine(engines[0], engines[1]) if len(engines) == 2 else engines[0]
+        self.model_parent = self.model_parents[0]
+        self.inference_engine = self.inference_engines[0]
+        self.model_name.set(" + ".join(item.name for item in self.model_parents))
+        self._set_secondary_view_visible(len(self.inference_engines) == 2)
         size = self.model_info.input_size
         input_description = f"{size[1]} x {size[0]}" if size else "Dynamic"
         outputs = "\n".join(f"  {item.name}: {item.shape}" for item in self.model_info.outputs)
@@ -771,7 +907,10 @@ class EchoSightApp(tk.Tk):
         metadata = dict(self.model_info.metadata)
         metrics = "\n".join(f"  {name}: {value:.2%}" for name, value in self.model_info.metrics) or "  Not available with this export"
         collaterals = ", ".join(self.model_info.collaterals) or "Embedded model metadata only"
-        pipeline = " -> ".join(info.task_type.value.replace("_", " ").title() for info in self.model_infos)
+        pipeline = " + ".join(
+            " -> ".join(info.task_type.value.replace("_", " ").title() for info in group)
+            for group in self.pipeline_model_infos
+        )
         stage_details = "\n".join(
             f"  {position}. {info.task_type.value.replace('_', ' ').title()}: {info.path.parent.parent.name} "
             f"(threshold {info.confidence_threshold:.1%})"
@@ -806,10 +945,22 @@ class EchoSightApp(tk.Tk):
         self._refresh_model_detail()
         self.threshold_button.configure(state="normal")
         self._log(
-            f"Model ready | {metadata.get('model_name', self.model_info.task_type.value)} | "
-            f"threshold {self.model_info.confidence_threshold:.1%} | {len(self.model_info.metrics)} metric(s)"
+            f"Model package ready | {parent.name} | {'chained' if chained else 'independent'} | "
+            f"{len(self.inference_engines)} package(s) loaded"
         )
         self._update_run_state()
+
+    def _set_secondary_view_visible(self, visible: bool) -> None:
+        panes = set(self.result_viewers.panes())
+        secondary = str(self.secondary_result_panel)
+        if visible and secondary not in panes:
+            self.result_viewers.add(self.secondary_result_panel, weight=1)
+        elif not visible and secondary in panes:
+            self.result_viewers.forget(self.secondary_result_panel)
+        if self.model_parents:
+            self.primary_result_title.configure(text=self.model_parents[0].name)
+        if len(self.model_parents) > 1:
+            self.secondary_result_title.configure(text=self.model_parents[1].name)
 
     def _select_images(self) -> None:
         selected = filedialog.askopenfilenames(title="Select images or TIFF files", filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp"), ("All files", "*.*")])
@@ -831,14 +982,21 @@ class EchoSightApp(tk.Tk):
         self.model_info = None
         self.model_infos = ()
         self.inference_engine = None
+        self.inference_engines = ()
+        self.pipeline_model_infos = ()
+        self.model_parents = ()
         self.model_detail_base = ""
         self.threshold_override_enabled.set(False)
         self.threshold_variables.clear()
         self.model_name.set("No model loaded")
         self._set_model_detail("Select the trained model's parent folder. EchoSight will locate the deployable OpenVINO IR or ONNX artifact.")
         self.results.clear()
+        self.secondary_results.clear()
         self.inference_failures.clear()
+        self.secondary_inference_failures.clear()
         self.hidden_annotations.clear()
+        self.secondary_hidden_annotations.clear()
+        self._set_secondary_view_visible(False)
         self._clear_results_ui()
         self._log("Model cleared | Loaded images retained")
         self.status_text.set("Model cleared | Load a model to run inference")
@@ -849,8 +1007,11 @@ class EchoSightApp(tk.Tk):
             return
         self.frames.clear()
         self.results.clear()
+        self.secondary_results.clear()
         self.inference_failures.clear()
+        self.secondary_inference_failures.clear()
         self.hidden_annotations.clear()
+        self.secondary_hidden_annotations.clear()
         self.preprocess_profiles.clear()
         self.annotation_profiles.clear()
         self.annotation_variables.clear()
@@ -899,8 +1060,11 @@ class EchoSightApp(tk.Tk):
             return
         self.frames, errors, count = payload
         self.results.clear()
+        self.secondary_results.clear()
         self.inference_failures.clear()
+        self.secondary_inference_failures.clear()
         self.hidden_annotations.clear()
+        self.secondary_hidden_annotations.clear()
         self.preprocess_profiles.clear()
         self.annotation_profiles.clear()
         self.image_list.delete(0, tk.END)
@@ -933,8 +1097,8 @@ class EchoSightApp(tk.Tk):
         frame = self.frames[index]
         if frame.is_optimized:
             self._log(
-                f"Large image optimized for memory | source {frame.original_size[0]} x {frame.original_size[1]} | "
-                f"working {frame.image.width} x {frame.image.height}"
+                f"Large image ready | full-resolution tiled inference {frame.original_size[0]} x {frame.original_size[1]} | "
+                f"bounded preview {frame.image.width} x {frame.image.height}"
             )
         frame = self.frames[index]
         self.status_text.set(f"{frame.display_name} | {frame.image.width} x {frame.image.height}")
@@ -990,24 +1154,26 @@ class EchoSightApp(tk.Tk):
         self._start_inference(list(enumerate(self.frames)))
 
     def _start_inference(self, frames: list[tuple[int, LoadedFrame]]) -> None:
-        if self.inference_engine is None or self.inference_running or not frames:
+        if not self.inference_engines or self.inference_running or not frames:
             return
         self.inference_running = True
         self.cancel_inference.clear()
         self.resume_activity.set()
         self.pause_button.configure(text="Pause", state="normal")
-        self.progress.configure(maximum=len(frames), value=0)
+        total_runs = len(frames) * len(self.inference_engines)
+        self.progress.configure(maximum=total_runs, value=0)
         self.load_model_button.configure(state="disabled")
         self.open_images_button.configure(state="disabled")
         self.cancel_button.configure(state="normal")
         self._update_run_state()
         self._set_activity("Running inference", True)
-        self._log(f"Inference started | {len(frames)} frame(s)")
+        self._log(f"Inference started | {len(frames)} frame(s) | {len(self.inference_engines)} model package(s)")
         if self._threshold_override_active():
             self._log(f"WARNING | Threshold override active | {self._threshold_summary()}")
         settings = {index: self._preprocess_settings(index) for index, _frame in frames}
         for index, _frame in frames:
             self.inference_failures.pop(index, None)
+            self.secondary_inference_failures.pop(index, None)
         threading.Thread(target=self._inference_worker, args=(frames, settings), daemon=True).start()
         self.after(100, self._poll_inference)
 
@@ -1018,22 +1184,43 @@ class EchoSightApp(tk.Tk):
     ) -> None:
         completed = 0
         failed = 0
+        total_runs = len(frames) * len(self.inference_engines)
         try:
-            for position, (index, frame) in enumerate(frames, start=1):
-                if not self._wait_if_paused():
-                    self.inference_events.put(("cancelled", completed))
-                    return
-                self.inference_events.put(("progress", (position, len(frames), frame.display_name)))
-                try:
-                    image = self._process_image(frame.image, settings[index])
-                    result = self.inference_engine.infer(image, frame.source)
-                    completed += 1
-                    self.inference_events.put(("result", (position, len(frames), index, result)))
-                except Exception as error:
-                    failed += 1
-                    LOGGER.exception("Inference failed for %s", frame.display_name)
-                    self.inference_events.put(("failure", (position, len(frames), index, frame.display_name, str(error))))
+            for frame_position, (index, frame) in enumerate(frames, start=1):
+                for model_index, engine in enumerate(self.inference_engines):
+                    operation = (frame_position - 1) * len(self.inference_engines) + model_index + 1
+                    if not self._wait_if_paused():
+                        self.inference_events.put(("cancelled", completed))
+                        return
+                    model_name = self.model_parents[model_index].name
+                    self.inference_events.put(("progress", (operation, total_runs, f"{frame.display_name} | {model_name}")))
+                    try:
+                        result = infer_frame(
+                            engine,
+                            frame,
+                            transform=lambda image, values=settings[index]: self._process_image(image, values),
+                            progress=lambda tile, tile_total, current=operation, total=total_runs, name=frame.display_name, model=model_name: self.inference_events.put(
+                                ("tile_progress", (current, total, f"{name} | {model}", tile, tile_total))
+                            ),
+                            should_continue=self._wait_if_paused,
+                            finalizing=lambda current=operation, total=total_runs, name=frame.display_name, model=model_name: self.inference_events.put(
+                                ("finalizing", (current, total, f"{name} | {model}"))
+                            ),
+                        )
+                        completed += 1
+                        self.inference_events.put(("result", (operation, total_runs, index, model_index, result)))
+                    except InterruptedError:
+                        self.inference_events.put(("cancelled", completed))
+                        return
+                    except Exception as error:
+                        failed += 1
+                        LOGGER.exception("Inference failed for %s with %s", frame.display_name, model_name)
+                        self.inference_events.put(
+                            ("failure", (operation, total_runs, index, model_index, f"{frame.display_name} | {model_name}", str(error)))
+                        )
             self.inference_events.put(("complete", (completed, failed)))
+        except InterruptedError:
+                    self.inference_events.put(("cancelled", completed))
         except Exception as error:
             LOGGER.exception("Inference failed")
             self.inference_events.put(("error", error))
@@ -1052,29 +1239,53 @@ class EchoSightApp(tk.Tk):
             self._log(detail)
             self.after(10, self._poll_inference)
             return
+        if event == "tile_progress":
+            position, total, name, tile, tile_total = payload
+            self.progress.configure(value=(position - 1) + tile / tile_total)
+            detail = f"Inferencing {name} | Frame {position}/{total} | Full-resolution tile {tile}/{tile_total}"
+            if self.resume_activity.is_set():
+                self._set_activity(detail, True)
+            self.status_text.set(detail if self.resume_activity.is_set() else "Paused")
+            self.after(10, self._poll_inference)
+            return
+        if event == "finalizing":
+            position, total, name = payload
+            detail = f"Consolidating {name} | Frame {position}/{total}"
+            self._set_activity(detail, True)
+            self._log(detail)
+            self.after(10, self._poll_inference)
+            return
         if event == "result":
-            position, total, index, result = payload
-            first_result = not self.results
-            self.results[index] = result
-            self.inference_failures.pop(index, None)
+            position, total, index, model_index, result = payload
+            first_result = not self.results and not self.secondary_results
+            target = self.results if model_index == 0 else self.secondary_results
+            failures = self.inference_failures if model_index == 0 else self.secondary_inference_failures
+            target[index] = result
+            failures.pop(index, None)
             self.progress.configure(value=position)
             self._refresh_result_list()
-            self._log(f"Frame {index + 1}/{len(self.frames)} | {result.summary} | {result.duration_ms:.1f} ms")
+            self._log(
+                f"Frame {index + 1}/{len(self.frames)} | {self.model_parents[model_index].name} | "
+                f"{result.summary} | {result.duration_ms:.1f} ms"
+            )
             if first_result:
                 self._select_result_frame(index)
             self.status_text.set(f"Processed {position} of {total}" if self.resume_activity.is_set() else "Paused")
             self.after(10, self._poll_inference)
             return
         if event == "failure":
-            position, total, index, name, message = payload
-            self.results.pop(index, None)
-            self.inference_failures[index] = message
-            self.hidden_annotations.pop(index, None)
+            position, total, index, model_index, name, message = payload
+            target = self.results if model_index == 0 else self.secondary_results
+            failures = self.inference_failures if model_index == 0 else self.secondary_inference_failures
+            hidden = self.hidden_annotations if model_index == 0 else self.secondary_hidden_annotations
+            target.pop(index, None)
+            failures[index] = message
+            hidden.pop(index, None)
             self.progress.configure(value=position)
             self._refresh_result_list()
             if self.current_result_index == index:
                 self.current_result_index = None
-                self.results_canvas.set_image(None)
+                (self.results_canvas if model_index == 0 else self.secondary_results_canvas).set_image(None)
                 self.result_text.set(f"Inference failed for {name}\n\n{message}")
             self._log(f"ERROR | {name} | {message}")
             self.status_text.set(f"Processed {position} of {total} | 1 failure" if self.resume_activity.is_set() else "Paused")
@@ -1134,24 +1345,27 @@ class EchoSightApp(tk.Tk):
         ordered = self._ordered_result_indexes()
         self.result_list.delete(*self.result_list.get_children())
         for index in ordered:
-            result = self.results[index]
-            annotations, confidence = self._result_metrics(result)
+            frame_results = self._frame_results(index)
+            metrics = [self._result_metrics(result) for _model_index, result in frame_results]
+            annotations = sum(item[0] for item in metrics)
+            confidence = max((item[1] for item in metrics if item[1] is not None), default=None)
             self.result_list.insert(
                 "",
                 tk.END,
                 iid=str(index),
                 values=(
                     self.frames[index].display_name,
-                    result.task_type.value.replace("_", " ").title(),
+                    " + ".join(result.task_type.value.replace("_", " ").title() for _model, result in frame_results),
                     annotations,
                     f"{confidence:.1%}" if confidence is not None else "--",
                 ),
             )
         self._update_result_headings()
-        restored = [item for item in selected if int(item) in self.results]
+        indexes = self._result_indexes()
+        restored = [item for item in selected if int(item) in indexes]
         if restored:
             self.result_list.selection_set(restored)
-        elif self.current_result_index in self.results:
+        elif self.current_result_index in indexes:
             self.result_list.selection_set(str(self.current_result_index))
         self._update_training_button_state()
 
@@ -1179,17 +1393,30 @@ class EchoSightApp(tk.Tk):
 
     def _ordered_result_indexes(self) -> list[int]:
         def sort_key(index: int) -> object:
-            result = self.results[index]
-            annotations, confidence = self._result_metrics(result)
+            frame_results = self._frame_results(index)
+            metrics = [self._result_metrics(result) for _model, result in frame_results]
+            annotations = sum(item[0] for item in metrics)
+            confidence = max((item[1] for item in metrics if item[1] is not None), default=None)
             keys = {
                 "frame": (self.frames[index].source.name.casefold(), self.frames[index].frame_number),
-                "type": result.task_type.value,
+                "type": "+".join(result.task_type.value for _model, result in frame_results),
                 "annotations": annotations,
                 "confidence": confidence if confidence is not None else -1.0,
             }
             return keys[self.result_sort_column]
 
-        return sorted(self.results, key=sort_key, reverse=self.result_sort_descending)
+        return sorted(self._result_indexes(), key=sort_key, reverse=self.result_sort_descending)
+
+    def _result_indexes(self) -> set[int]:
+        return set(self.results) | set(self.secondary_results)
+
+    def _frame_results(self, index: int) -> list[tuple[int, InferenceResult]]:
+        values = []
+        if index in self.results:
+            values.append((0, self.results[index]))
+        if index in self.secondary_results:
+            values.append((1, self.secondary_results[index]))
+        return values
 
     def _sort_results(self, column: str) -> None:
         if self.result_sort_column == column:
@@ -1210,6 +1437,8 @@ class EchoSightApp(tk.Tk):
     def _select_result_frame(self, index: int) -> None:
         if index != self.current_result_index:
             self.results_canvas.reset_view()
+            self.secondary_results_canvas.reset_view()
+            self.annotation_page = 0
         self.current_result_index = index
         if self.annotation_popup is None:
             self._load_annotation_profile(index)
@@ -1218,24 +1447,74 @@ class EchoSightApp(tk.Tk):
             self.image_list.selection_set(index)
             self.image_list.activate(index)
             self._select_analysis_frame(index)
-        if index in self.results and str(index) not in self.result_list.selection():
+        if index in self._result_indexes() and str(index) not in self.result_list.selection():
             self.result_list.selection_set(str(index))
-        if index in self.results:
+        if index in self._result_indexes():
             self.result_list.see(str(index))
         self._refresh_result()
-        self._show_result_details(self.results[index])
+        self._show_result_details(index)
 
     def _refresh_result(self) -> None:
-        if self.current_result_index is None or self.current_result_index not in self.results:
+        if self.current_result_index is None or self.current_result_index not in self._result_indexes():
             return
         index = self.current_result_index
-        rendered = render_result(
-            self._processed_image(self.frames[index].image, index),
-            self.results[index],
+        self.result_render_generation += 1
+        self.pending_result_render = (
+            self.result_render_generation,
+            index,
+            self.frames[index].image,
+            self._preprocess_settings(index),
             self._render_options(index, live=True),
-            self.hidden_annotations.get(index, set()),
+            self.results.get(index),
+            set(self.hidden_annotations.get(index, set())),
+            self.secondary_results.get(index),
+            set(self.secondary_hidden_annotations.get(index, set())),
         )
-        self.results_canvas.set_image(rendered)
+        if not self.result_render_running:
+            self._start_pending_result_render()
+
+    def _start_pending_result_render(self) -> None:
+        payload = self.pending_result_render
+        if payload is None:
+            return
+        self.pending_result_render = None
+        self.result_render_running = True
+        threading.Thread(target=self._result_render_worker, args=payload, daemon=True).start()
+        self.after(10, self._poll_result_render)
+
+    def _result_render_worker(
+        self,
+        generation: int,
+        index: int,
+        image: Image.Image,
+        settings: tuple[float, float, float, float],
+        options: RenderOptions,
+        primary: InferenceResult | None,
+        primary_hidden: set[int],
+        secondary: InferenceResult | None,
+        secondary_hidden: set[int],
+    ) -> None:
+        try:
+            source = self._process_image(image, settings)
+            primary_image = render_result(source, primary, options, primary_hidden) if primary is not None else None
+            secondary_image = render_result(source, secondary, options, secondary_hidden) if secondary is not None else None
+            self.result_render_events.put((generation, index, primary_image, secondary_image))
+        except Exception:
+            LOGGER.exception("Result rendering failed")
+            self.result_render_events.put((generation, index, None, None))
+
+    def _poll_result_render(self) -> None:
+        try:
+            generation, index, primary_image, secondary_image = self.result_render_events.get_nowait()
+        except queue.Empty:
+            self.after(10, self._poll_result_render)
+            return
+        self.result_render_running = False
+        if generation == self.result_render_generation and index == self.current_result_index:
+            self.results_canvas.set_image(primary_image)
+            self.secondary_results_canvas.set_image(secondary_image)
+        if self.pending_result_render is not None:
+            self._start_pending_result_render()
 
     def _refresh_annotation_views(self) -> None:
         self._refresh_result()
@@ -1277,9 +1556,9 @@ class EchoSightApp(tk.Tk):
         self.annotation_color = options.annotation_color
 
     def _select_export_destination(self, current_only: bool = False) -> None:
-        if self.model_info is None or (not self.results and not self.inference_failures):
+        if self.model_info is None or (not self._result_indexes() and not self.inference_failures and not self.secondary_inference_failures):
             return
-        if current_only and self.current_result_index not in self.results:
+        if current_only and self.current_result_index not in self._result_indexes():
             return
         selected = filedialog.askdirectory(title="Select folder for exported run", mustexist=True)
         if not selected:
@@ -1310,7 +1589,11 @@ class EchoSightApp(tk.Tk):
         self._update_run_state()
         self._set_activity("Exporting results", True)
         selected_results, selected_failures = self._export_payload(current_only)
-        self._log(f"Export started | {len(selected_results)} result(s), {len(selected_failures)} failure(s)")
+        secondary_results, secondary_failures = self._secondary_export_payload(current_only)
+        self._log(
+            f"Export started | model 1: {len(selected_results)} result(s), {len(selected_failures)} failure(s) | "
+            f"model 2: {len(secondary_results)} result(s), {len(secondary_failures)} failure(s)"
+        )
         threading.Thread(
             target=self._export_worker,
             args=(
@@ -1318,23 +1601,33 @@ class EchoSightApp(tk.Tk):
                 list(self.frames),
                 selected_results,
                 self.model_info,
-                self.model_infos,
+                self.pipeline_model_infos[0],
                 self.model_parent,
                 preprocessing,
                 settings_by_frame,
                 {index: self._render_options(index) for index in range(len(self.frames))},
                 {index: set(hidden) for index, hidden in self.hidden_annotations.items()},
                 selected_failures,
-                tuple(engine.confidence_threshold for engine in self._threshold_engines()),
+                self._pipeline_thresholds(0),
+                secondary_results,
+                secondary_failures,
+                {index: set(hidden) for index, hidden in self.secondary_hidden_annotations.items()},
             ),
             daemon=True,
         ).start()
         self.after(100, self._poll_export)
 
     def _export_payload(self, current_only: bool) -> tuple[dict[int, InferenceResult], dict[int, str]]:
-        if current_only and self.current_result_index is not None:
-            return {self.current_result_index: self.results[self.current_result_index]}, {}
+        if current_only:
+            result = self.results.get(self.current_result_index)
+            return ({self.current_result_index: result}, {}) if result is not None else ({}, {})
         return dict(self.results), dict(self.inference_failures)
+
+    def _secondary_export_payload(self, current_only: bool) -> tuple[dict[int, InferenceResult], dict[int, str]]:
+        if current_only:
+            result = self.secondary_results.get(self.current_result_index)
+            return ({self.current_result_index: result}, {}) if result is not None else ({}, {})
+        return dict(self.secondary_results), dict(self.secondary_inference_failures)
 
     def _mark_for_training(self, category: str) -> None:
         indexes = self._selected_result_indexes()
@@ -1344,7 +1637,9 @@ class EchoSightApp(tk.Tk):
         selected = filedialog.askdirectory(title="Select folder for training images", mustexist=True)
         if not selected:
             return
-        if self.model_parent is not None:
+        if len(self.model_parents) > 1:
+            model_folder_name = "__".join(parent.name for parent in self.model_parents)
+        elif self.model_parent is not None:
             model_folder_name = self.model_parent.name
         elif self.model_info is not None:
             model_folder_name = self.model_info.path.parent.name
@@ -1370,7 +1665,8 @@ class EchoSightApp(tk.Tk):
         )
 
     def _selected_result_indexes(self) -> list[int]:
-        return sorted(int(item) for item in self.result_list.selection() if int(item) in self.results)
+        indexes = self._result_indexes()
+        return sorted(int(item) for item in self.result_list.selection() if int(item) in indexes)
 
     def _update_training_button_state(self) -> None:
         enabled = bool(self.result_list.selection()) and not self.inference_running and not self.export_running
@@ -1392,28 +1688,54 @@ class EchoSightApp(tk.Tk):
         hidden_annotations: dict[int, set[int]],
         failures: dict[int, str],
         effective_confidence_thresholds: tuple[float, ...],
+        secondary_results: dict[int, InferenceResult],
+        secondary_failures: dict[int, str],
+        secondary_hidden_annotations: dict[int, set[int]],
     ) -> None:
         try:
             def report_progress(position: int, total: int, name: str) -> None:
                 self._wait_if_paused()
                 self.export_events.put(("progress", (position, total, name)))
 
-            report = export_run(
-                destination=destination,
-                frames=frames,
-                results=results,
-                model_info=model_info,
-                pipeline_model_infos=model_infos,
-                model_parent=model_parent,
-                preprocessing=preprocessing,
-                render_options_by_frame=render_options,
-                hidden_annotations=hidden_annotations,
-                failures=failures,
-                frame_image_transform=lambda image, index: self._process_image(image, settings[index]),
-                progress=report_progress,
-                effective_confidence_thresholds=effective_confidence_thresholds,
-            )
-            self.export_events.put(("complete", report))
+            reports = []
+            if results or failures:
+                reports.append(
+                    export_run(
+                        destination=destination,
+                        frames=frames,
+                        results=results,
+                        model_info=model_info,
+                        pipeline_model_infos=model_infos,
+                        model_parent=model_parent,
+                        preprocessing=preprocessing,
+                        render_options_by_frame=render_options,
+                        hidden_annotations=hidden_annotations,
+                        failures=failures,
+                        frame_image_transform=lambda image, index: self._process_image(image, settings[index]),
+                        progress=report_progress,
+                        effective_confidence_thresholds=effective_confidence_thresholds,
+                    )
+                )
+            if secondary_results or secondary_failures:
+                secondary_infos = self.pipeline_model_infos[1]
+                reports.append(
+                    export_run(
+                        destination=destination,
+                        frames=frames,
+                        results=secondary_results,
+                        model_info=secondary_infos[0],
+                        pipeline_model_infos=secondary_infos,
+                        model_parent=self.model_parents[1],
+                        preprocessing=preprocessing,
+                        render_options_by_frame=render_options,
+                        hidden_annotations=secondary_hidden_annotations,
+                        failures=secondary_failures,
+                        frame_image_transform=lambda image, index: self._process_image(image, settings[index]),
+                        progress=report_progress,
+                        effective_confidence_thresholds=self._pipeline_thresholds(1),
+                    )
+                )
+            self.export_events.put(("complete", tuple(reports)))
         except Exception as error:
             LOGGER.exception("Result export failed")
             self.export_events.put(("error", error))
@@ -1442,26 +1764,34 @@ class EchoSightApp(tk.Tk):
             self._log(f"ERROR | Export failed: {payload}")
             messagebox.showerror("Export error", str(payload))
             return
-        report: ExportReport = payload
-        self.status_text.set(f"Export complete: {report.directory}")
-        self._log(f"Export complete | {report.directory}")
+        reports: tuple[ExportReport, ...] = payload
+        directories = "\n".join(str(report.directory) for report in reports)
+        exported = sum(report.exported_frames for report in reports)
+        failed = sum(report.failed_frames for report in reports)
+        self.status_text.set(f"Export complete: {reports[0].directory}")
+        self._log(f"Export complete | {directories.replace(chr(10), ' | ')}")
         messagebox.showinfo(
             "Export complete",
-            f"Exported {report.exported_frames} result(s) and {report.failed_frames} failure(s).\n\n{report.directory}",
+            f"Exported {exported} result(s) and {failed} failure(s).\n\n{directories}",
         )
 
-    def _show_result_details(self, result: InferenceResult) -> None:
-        lines = [result.summary, f"Inference: {result.duration_ms:.1f} ms", f"Input: {result.input_size[0]} x {result.input_size[1]}"]
-        lines.extend(
-            f"{'Classification' if item.stage == 'classification' else 'Detection'} "
-            f"ROI {item.roi_index or '-'} | {item.label}: {self._confidence_text(item.confidence)}"
-            for item in result.detections
-        )
-        lines.extend(f"{item.label}: {item.confidence:.1%}" for item in result.classifications)
+    def _show_result_details(self, index: int) -> None:
+        lines = []
+        for model_index, result in self._frame_results(index):
+            model_name = self.model_parents[model_index].name
+            lines.extend((model_name, result.summary, f"Inference: {result.duration_ms:.1f} ms", f"Input: {result.input_size[0]} x {result.input_size[1]}"))
+            annotations = [
+                f"{'Classification' if item.stage == 'classification' else 'Detection'} "
+                f"ROI {item.roi_index or '-'} | {item.label}: {self._confidence_text(item.confidence)}"
+                for item in result.detections
+            ]
+            annotations.extend(f"{item.label}: {item.confidence:.1%}" for item in result.classifications)
+            lines.extend(annotations)
+            lines.append("")
         self.result_text.set("\n".join(lines))
-        self._build_annotation_controls(result)
+        self._build_annotation_controls(index)
 
-    def _build_annotation_controls(self, result: InferenceResult) -> None:
+    def _build_annotation_controls(self, frame_index: int) -> None:
         for child in self.annotation_container.winfo_children():
             child.destroy()
         self.annotation_variables.clear()
@@ -1474,40 +1804,89 @@ class EchoSightApp(tk.Tk):
                 wraplength=280,
                 justify="left",
             ).pack(anchor="w", pady=(0, 7))
-        entries: list[str] = []
-        if result.anomaly_score is not None:
-            entries.append(f"Anomaly heatmap | {result.anomaly_score:.1%}")
-        entries.extend(
-            f"{'Classification' if item.stage == 'classification' else 'Detection'} "
-            f"| ROI {item.roi_index or '-'} | {item.label} | {self._confidence_text(item.confidence)}"
-            for item in result.detections
-        )
-        entries.extend(f"{item.label} | {item.confidence:.1%}" for item in result.classifications)
-        if not entries:
+        controls: list[tuple[int, int, str, str]] = []
+        for model_index, result in self._frame_results(frame_index):
+            entries: list[str] = []
+            if result.anomaly_score is not None:
+                entries.append(f"Anomaly heatmap | {result.anomaly_score:.1%}")
+            entries.extend(
+                f"{'Classification' if item.stage == 'classification' else 'Detection'} "
+                f"| ROI {item.roi_index or '-'} | {item.label} | {self._confidence_text(item.confidence)}"
+                for item in result.detections
+            )
+            entries.extend(f"{item.label} | {item.confidence:.1%}" for item in result.classifications)
+            for annotation_index, text in enumerate(entries):
+                controls.append((model_index, annotation_index, self.model_parents[model_index].name, text))
+        if not controls:
             ttk.Label(self.annotation_container, text="No annotations", style="PanelText.TLabel").pack(anchor="w")
             return
-        hidden = self.hidden_annotations.setdefault(self.current_result_index, set())
-        for index, text in enumerate(entries):
-            variable = tk.BooleanVar(value=index not in hidden)
+
+        page_count = max(1, (len(controls) + ANNOTATIONS_PER_PAGE - 1) // ANNOTATIONS_PER_PAGE)
+        self.annotation_page = min(getattr(self, "annotation_page", 0), page_count - 1)
+        start = self.annotation_page * ANNOTATIONS_PER_PAGE
+        visible_controls = controls[start : start + ANNOTATIONS_PER_PAGE]
+        previous_model: int | None = None
+        for model_index, annotation_index, model_name, text in visible_controls:
+            if model_index != previous_model:
+                ttk.Label(self.annotation_container, text=model_name, style="PanelTitle.TLabel").pack(
+                    anchor="w", pady=(6 if previous_model is not None else 0, 3)
+                )
+                previous_model = model_index
+            hidden_store = self.hidden_annotations if model_index == 0 else self.secondary_hidden_annotations
+            hidden = hidden_store.setdefault(frame_index, set())
+            variable = tk.BooleanVar(value=annotation_index not in hidden)
             self.annotation_variables.append(variable)
             ttk.Checkbutton(
                 self.annotation_container,
                 text=text,
                 variable=variable,
-                command=lambda annotation=index, state=variable: self._toggle_annotation(annotation, state),
+                command=lambda model=model_index, annotation=annotation_index, state=variable: self._toggle_annotation(model, annotation, state),
                 style="Panel.TCheckbutton",
             ).pack(anchor="w", pady=2)
+        if page_count > 1:
+            navigation = ttk.Frame(self.annotation_container, style="Panel.TFrame")
+            navigation.pack(fill="x", pady=(8, 2))
+            ttk.Button(
+                navigation,
+                text="<",
+                width=3,
+                state="normal" if self.annotation_page > 0 else "disabled",
+                command=lambda: self._change_annotation_page(frame_index, -1),
+                style="Tool.TButton",
+            ).pack(side="left")
+            ttk.Label(
+                navigation,
+                text=f"{start + 1}-{start + len(visible_controls)} of {len(controls)}",
+                style="PanelText.TLabel",
+            ).pack(side="left", expand=True)
+            ttk.Button(
+                navigation,
+                text=">",
+                width=3,
+                state="normal" if self.annotation_page + 1 < page_count else "disabled",
+                command=lambda: self._change_annotation_page(frame_index, 1),
+                style="Tool.TButton",
+            ).pack(side="right")
 
-    def _toggle_annotation(self, index: int, state: tk.BooleanVar) -> None:
+    def _change_annotation_page(self, frame_index: int, offset: int) -> None:
+        self.annotation_page = max(0, self.annotation_page + offset)
+        self._build_annotation_controls(frame_index)
+        self.annotation_canvas.yview_moveto(0.0)
+
+    def _toggle_annotation(self, model_index: int, index: int, state: tk.BooleanVar) -> None:
         if self.current_result_index is None:
             return
-        hidden = self.hidden_annotations.setdefault(self.current_result_index, set())
+        store = self.hidden_annotations if model_index == 0 else self.secondary_hidden_annotations
+        hidden = store.setdefault(self.current_result_index, set())
         hidden.discard(index) if state.get() else hidden.add(index)
         self._refresh_result()
 
     def _clear_results_ui(self) -> None:
+        self.result_render_generation += 1
+        self.pending_result_render = None
         self.result_list.delete(*self.result_list.get_children())
         self.results_canvas.set_image(None)
+        self.secondary_results_canvas.set_image(None)
         self.result_text.set("Run inference in Analysis to populate results.")
         for child in self.annotation_container.winfo_children():
             child.destroy()
@@ -1515,17 +1894,19 @@ class EchoSightApp(tk.Tk):
         self._update_training_button_state()
 
     def _update_run_state(self) -> None:
-        state = "normal" if self.inference_engine and self.frames and not self.inference_running and not self.export_running else "disabled"
+        state = "normal" if self.inference_engines and self.frames and not self.inference_running and not self.export_running else "disabled"
         self.run_button.configure(state=state)
         self.run_all_button.configure(state=state)
         self.run_selected_button.configure(state=state)
-        export_state = "normal" if self.model_info and (self.results or self.inference_failures) and not self.inference_running and not self.export_running else "disabled"
+        export_state = "normal" if self.model_info and (self._result_indexes() or self.inference_failures or self.secondary_inference_failures) and not self.inference_running and not self.export_running else "disabled"
         self.export_button.configure(state=export_state)
-        current_export_state = "normal" if self.current_result_index in self.results and export_state == "normal" else "disabled"
+        current_export_state = "normal" if self.current_result_index in self._result_indexes() and export_state == "normal" else "disabled"
         self.export_current_button.configure(state=current_export_state)
         threshold_state = "normal" if self.model_info and not self.inference_running and not self.export_running else "disabled"
         self.threshold_button.configure(state=threshold_state)
         self.clear_model_button.configure(state=threshold_state)
+        add_model_state = "normal" if self.model_info and len(self.inference_engines) < 2 and not self.inference_running and not self.export_running else "disabled"
+        self.add_model_button.configure(state=add_model_state)
         clear_images_state = "normal" if self.frames and not self.inference_running and not self.export_running else "disabled"
         self.clear_images_button.configure(state=clear_images_state)
         terminal_state = "normal" if not self.export_running else "disabled"
@@ -1544,11 +1925,19 @@ class EchoSightApp(tk.Tk):
         self.model_detail.configure(state="disabled")
 
     def _threshold_engines(self) -> tuple[InferenceEngine, ...]:
-        if isinstance(self.inference_engine, ChainedInferenceEngine):
-            return self.inference_engine.detector, self.inference_engine.classifier
-        if isinstance(self.inference_engine, InferenceEngine):
-            return (self.inference_engine,)
-        return ()
+        engines: list[InferenceEngine] = []
+        for pipeline in self.inference_engines:
+            if isinstance(pipeline, ChainedInferenceEngine):
+                engines.extend((pipeline.detector, pipeline.classifier))
+            elif isinstance(pipeline, InferenceEngine):
+                engines.append(pipeline)
+        return tuple(engines)
+
+    def _pipeline_thresholds(self, model_index: int) -> tuple[float, ...]:
+        pipeline = self.inference_engines[model_index]
+        if isinstance(pipeline, ChainedInferenceEngine):
+            return pipeline.detector.confidence_threshold, pipeline.classifier.confidence_threshold
+        return (pipeline.confidence_threshold,)
 
     def _threshold_override_active(self) -> bool:
         engines = self._threshold_engines()
@@ -1663,8 +2052,11 @@ class EchoSightApp(tk.Tk):
             engine.confidence_threshold = min(1.0, max(0.01, float(value)))
         if changed:
             self.results.clear()
+            self.secondary_results.clear()
             self.inference_failures.clear()
+            self.secondary_inference_failures.clear()
             self.hidden_annotations.clear()
+            self.secondary_hidden_annotations.clear()
             self._clear_results_ui()
         self._refresh_model_detail()
         state = "active" if self._threshold_override_active() else "reset to model defaults"

@@ -7,7 +7,8 @@ from unittest.mock import Mock, patch
 import numpy as np
 from PIL import Image
 
-from echosight2.desktop import EchoSightApp
+from echosight2.desktop import MAX_CANVAS_ZOOM, EchoSightApp, FitImageCanvas
+from echosight2.exporting import ExportReport
 from echosight2.frames import LoadedFrame
 from echosight2.inference import (
     ChainedInferenceEngine,
@@ -67,10 +68,14 @@ def test_threshold_override_applies_per_stage_and_resets_to_model_defaults() -> 
     detector = Mock(spec=InferenceEngine, confidence_threshold=0.6)
     classifier = Mock(spec=InferenceEngine, confidence_threshold=0.5)
     app.inference_engine = Mock(spec=ChainedInferenceEngine, detector=detector, classifier=classifier)
+    app.inference_engines = (app.inference_engine,)
     app.model_infos = (detector_info, classifier_info)
     app.results = {0: _result(0.91)}
+    app.secondary_results = {}
     app.inference_failures = {1: "failed"}
+    app.secondary_inference_failures = {}
     app.hidden_annotations = {0: {1}}
+    app.secondary_hidden_annotations = {}
     app._clear_results_ui = Mock()
     app._refresh_model_detail = Mock()
     app._log = Mock()
@@ -115,6 +120,159 @@ def test_all_export_payload_preserves_results_and_failures() -> None:
     assert failures == app.inference_failures
 
 
+def test_secondary_export_payload_is_independent_from_primary_results() -> None:
+    app = object.__new__(EchoSightApp)
+    app.current_result_index = 2
+    app.secondary_results = {2: _result(0.81), 4: _result(0.67)}
+    app.secondary_inference_failures = {5: "secondary failed"}
+
+    current, current_failures = app._secondary_export_payload(current_only=True)
+    all_results, all_failures = app._secondary_export_payload(current_only=False)
+
+    assert current == {2: app.secondary_results[2]}
+    assert current_failures == {}
+    assert all_results == app.secondary_results
+    assert all_failures == app.secondary_inference_failures
+
+
+def test_current_export_does_not_include_other_frames_from_missing_model() -> None:
+    app = object.__new__(EchoSightApp)
+    app.current_result_index = 2
+    app.results = {1: _result(0.91)}
+    app.secondary_results = {2: _result(0.81), 4: _result(0.67)}
+    app.inference_failures = {3: "primary failed"}
+    app.secondary_inference_failures = {}
+
+    primary, primary_failures = app._export_payload(current_only=True)
+    secondary, secondary_failures = app._secondary_export_payload(current_only=True)
+
+    assert primary == {}
+    assert primary_failures == {}
+    assert secondary == {2: app.secondary_results[2]}
+    assert secondary_failures == {}
+
+
+def test_dual_export_worker_keeps_pipeline_metadata_separate(tmp_path: Path) -> None:
+    app = object.__new__(EchoSightApp)
+    primary_info = Mock()
+    secondary_info = Mock()
+    app.pipeline_model_infos = ((primary_info,), (secondary_info,))
+    app.model_parents = (tmp_path / "primary", tmp_path / "secondary")
+    app.inference_engines = (Mock(confidence_threshold=0.4), Mock(confidence_threshold=0.7))
+    app.export_events = queue.Queue()
+    app._wait_if_paused = Mock(return_value=True)
+    frame = LoadedFrame(tmp_path / "frame.png", 1, 1, Image.new("RGB", (8, 6), "black"))
+    reports = (
+        ExportReport(tmp_path / "run1", tmp_path / "m1.json", tmp_path / "r1.csv", (), 1, 0),
+        ExportReport(tmp_path / "run2", tmp_path / "m2.json", tmp_path / "r2.csv", (), 1, 0),
+    )
+
+    with patch("echosight2.desktop.export_run", side_effect=reports) as export:
+        app._export_worker(
+            tmp_path,
+            [frame],
+            {0: _result(0.91)},
+            primary_info,
+            (primary_info,),
+            app.model_parents[0],
+            {},
+            {0: app._default_preprocess_settings()},
+            {0: RenderOptions()},
+            {},
+            {},
+            (0.4,),
+            {0: _result(0.72)},
+            {},
+            {},
+        )
+
+    assert export.call_args_list[0].kwargs["pipeline_model_infos"] == (primary_info,)
+    assert export.call_args_list[1].kwargs["pipeline_model_infos"] == (secondary_info,)
+    assert app.export_events.get_nowait() == ("complete", reports)
+
+
+def test_inference_worker_runs_chain_and_independent_model_sequentially(tmp_path: Path) -> None:
+    app = object.__new__(EchoSightApp)
+    chain = object.__new__(ChainedInferenceEngine)
+    independent = Mock(spec=InferenceEngine)
+    app.inference_engines = (chain, independent)
+    app.model_parents = (Path("chain"), Path("independent"))
+    app.inference_events = queue.Queue()
+    app._wait_if_paused = Mock(return_value=True)
+    frame = LoadedFrame(tmp_path / "frame.png", 1, 1, Image.new("RGB", (8, 6), "black"))
+    chain_result = _result(0.91)
+    independent_result = _result(0.72)
+
+    with patch("echosight2.desktop.infer_frame", side_effect=(chain_result, independent_result)) as infer:
+        app._inference_worker([(0, frame)], {0: app._default_preprocess_settings()})
+
+    events = list(app.inference_events.queue)
+    assert [call.args[0] for call in infer.call_args_list] == [chain, independent]
+    assert [(payload[3], payload[4]) for event, payload in events if event == "result"] == [
+        (0, chain_result),
+        (1, independent_result),
+    ]
+    assert events[-1] == ("complete", (2, 0))
+
+
+def test_annotation_visibility_is_isolated_per_model() -> None:
+    app = object.__new__(EchoSightApp)
+    app.current_result_index = 3
+    app.hidden_annotations = {}
+    app.secondary_hidden_annotations = {}
+    app._refresh_result = Mock()
+
+    app._toggle_annotation(1, 2, Mock(get=Mock(return_value=False)))
+
+    assert app.hidden_annotations == {}
+    assert app.secondary_hidden_annotations == {3: {2}}
+    app._refresh_result.assert_called_once_with()
+
+
+def test_canvas_zoom_reaches_high_magnification_without_exceeding_bound() -> None:
+    canvas = object.__new__(FitImageCanvas)
+    canvas.source_image = Image.new("RGB", (100, 100))
+    canvas.zoom = MAX_CANVAS_ZOOM / 1.2
+    canvas.pan_x = 0.0
+    canvas.pan_y = 0.0
+    canvas.winfo_width = Mock(return_value=500)
+    canvas.winfo_height = Mock(return_value=400)
+    canvas._draw = Mock()
+    event = Mock(delta=120, x=250, y=200)
+
+    canvas._zoom_image(event)
+    canvas._zoom_image(event)
+
+    assert canvas.zoom == MAX_CANVAS_ZOOM
+    canvas._draw.assert_called()
+
+
+def test_result_redraw_coalesces_to_latest_request() -> None:
+    app = object.__new__(EchoSightApp)
+    app.current_result_index = 0
+    app.frames = [Mock(image=Image.new("RGB", (8, 6), "black"))]
+    app.results = {0: _result(0.91)}
+    app.secondary_results = {}
+    app.hidden_annotations = {}
+    app.secondary_hidden_annotations = {}
+    app.result_render_generation = 0
+    app.result_render_running = True
+    app.pending_result_render = None
+    app._preprocess_settings = Mock(return_value=app._default_preprocess_settings())
+    app._render_options = Mock(return_value=RenderOptions())
+    app._start_pending_result_render = Mock()
+
+    app._refresh_result()
+    first = app.pending_result_render
+    app.hidden_annotations = {0: {0}}
+    app._refresh_result()
+
+    assert first is not app.pending_result_render
+    assert app.pending_result_render[0] == 2
+    assert app.pending_result_render[6] == {0}
+    app._start_pending_result_render.assert_not_called()
+
+
 def test_clear_model_retains_images_and_clears_model_results() -> None:
     app = object.__new__(EchoSightApp)
     app.inference_running = False
@@ -124,11 +282,17 @@ def test_clear_model_retains_images_and_clears_model_results() -> None:
     app.model_parent = Path("model")
     app.model_infos = (Mock(),)
     app.inference_engine = Mock()
+    app.inference_engines = (app.inference_engine,)
+    app.pipeline_model_infos = ((app.model_infos[0],),)
+    app.model_parents = (app.model_parent,)
     app.model_detail_base = "details"
     app.frames = [Mock()]
     app.results = {0: _result(0.91)}
+    app.secondary_results = {}
     app.inference_failures = {1: "failed"}
+    app.secondary_inference_failures = {}
     app.hidden_annotations = {0: {1}}
+    app.secondary_hidden_annotations = {}
     app.threshold_override_enabled = Mock()
     app.threshold_variables = [Mock()]
     app.model_name = Mock()
@@ -136,6 +300,7 @@ def test_clear_model_retains_images_and_clears_model_results() -> None:
     app._close_threshold_popup = Mock()
     app._set_model_detail = Mock()
     app._clear_results_ui = Mock()
+    app._set_secondary_view_visible = Mock()
     app._log = Mock()
     app._update_run_state = Mock()
 
@@ -156,8 +321,11 @@ def test_clear_images_retains_model_and_clears_frame_state() -> None:
     app.model_info = Mock()
     app.frames = [Mock()]
     app.results = {0: _result(0.91)}
+    app.secondary_results = {}
     app.inference_failures = {1: "failed"}
+    app.secondary_inference_failures = {}
     app.hidden_annotations = {0: {1}}
+    app.secondary_hidden_annotations = {}
     app.preprocess_profiles = {0: (1.0, 1.0, 1.0, 0.0)}
     app.annotation_profiles = {0: RenderOptions()}
     app.annotation_variables = [Mock()]
@@ -241,6 +409,47 @@ def test_maximize_window_uses_fullscreen_fallback() -> None:
     app._maximize_window()
 
     app.attributes.assert_called_once_with("-fullscreen", True)
+
+
+def test_dark_title_bar_uses_modern_windows_attribute() -> None:
+    app = object.__new__(EchoSightApp)
+    app.winfo_id = Mock(return_value=1234)
+    set_attribute = Mock(return_value=0)
+
+    with patch("echosight2.desktop.sys.platform", "win32"), patch(
+        "echosight2.desktop.ctypes.windll", create=True
+    ) as windll:
+        windll.user32.GetParent.return_value = 5678
+        windll.dwmapi.DwmSetWindowAttribute = set_attribute
+        app._enable_dark_title_bar()
+
+    assert set_attribute.call_count == 1
+    assert set_attribute.call_args.args[:2] == (5678, 20)
+
+
+def test_dark_title_bar_falls_back_for_older_windows() -> None:
+    app = object.__new__(EchoSightApp)
+    app.winfo_id = Mock(return_value=1234)
+    set_attribute = Mock(side_effect=(1, 0))
+
+    with patch("echosight2.desktop.sys.platform", "win32"), patch(
+        "echosight2.desktop.ctypes.windll", create=True
+    ) as windll:
+        windll.user32.GetParent.return_value = 5678
+        windll.dwmapi.DwmSetWindowAttribute = set_attribute
+        app._enable_dark_title_bar()
+
+    assert [call.args[1] for call in set_attribute.call_args_list] == [20, 19]
+
+
+def test_dark_title_bar_is_skipped_outside_windows() -> None:
+    app = object.__new__(EchoSightApp)
+    app.winfo_id = Mock()
+
+    with patch("echosight2.desktop.sys.platform", "linux"):
+        app._enable_dark_title_bar()
+
+    app.winfo_id.assert_not_called()
 
 
 def test_annotation_draft_includes_control_values() -> None:
@@ -355,11 +564,13 @@ def test_mark_for_training_exports_all_selected_false_hit_frames(tmp_path: Path)
     app = object.__new__(EchoSightApp)
     app.result_list = Mock(selection=Mock(return_value=("1", "3")))
     app.results = {1: _result(0.72), 3: _result(0.91)}
+    app.secondary_results = {}
     app.frames = [
         LoadedFrame(tmp_path / f"frame_{index}.png", 1, 1, Image.new("RGB", (8, 6), "black"))
         for index in range(4)
     ]
     app.model_parent = Path("C:/models/Detection Model V17")
+    app.model_parents = (app.model_parent,)
     app.model_info = None
     app.status_text = Mock()
     app._log = Mock()

@@ -9,6 +9,7 @@ from .engine import (
 )
 from .model_loader import ModelInfo, ModelLoader, TaskType, TensorInfo
 from .pipeline import ChainedInferenceEngine, discover_detection_classification_chain
+from .tiled import infer_frame
 
 __all__ = [
 	"ChainedInferenceEngine",
@@ -22,4 +23,5 @@ __all__ = [
 	"TaskType",
 	"TensorInfo",
 	"discover_detection_classification_chain",
+	"infer_frame",
 ]
