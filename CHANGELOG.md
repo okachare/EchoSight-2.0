@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased] - 2026-09-30
+## [Unreleased] - 2026-10-02
+
+### Published
+- Synchronized the current EchoSight 2.0 source and operator documentation to `okachare/EchoSight-2.0` and `okachare/GeTi_CSAM_PVA`.
+- Refreshed the shared operator deployment at `\\datagrovera.ra.intel.com\QR_MD6_QRE\CSAM\EchoSight`; `DEPLOYMENT_MANIFEST.json` records the exact repository commits and SHA-256 hash of every deployed runtime file.
 
 ### Added
 - Per-frame or all-frame Image Adjustments for brightness, contrast, sharpness, and continuous denoise strength.
