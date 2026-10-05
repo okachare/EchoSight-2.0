@@ -68,6 +68,7 @@ The model's embedded confidence threshold remains the default. Experienced revie
 - Calibrated anomaly heatmaps and scores
 - Global overlay visibility controls
 - Per-frame annotation visibility controls
+- Per-frame, per-model annotation selection from either the annotation list or Results image, with a high-contrast highlight and **Show selected annotations** filtering for dense results
 - Per-frame or all-frame Annotation Control for Calibri label size, annotation color, line thickness, and independent annotation/label transparency
 - Multi-select Results actions that save original frames as False Hits or Misses for model retraining
 - Mouse-wheel zoom, drag-to-pan, and double-click fit reset in both previews

@@ -8,6 +8,7 @@ import queue
 import sys
 import threading
 import tkinter as tk
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -36,6 +37,28 @@ ANNOTATIONS_PER_PAGE = 100
 MAX_CANVAS_ZOOM = 1024.0
 
 
+def annotation_at_point(
+    result: InferenceResult,
+    point: tuple[float, float],
+    rendered_size: tuple[int, int],
+) -> int | None:
+    """Return the smallest spatial annotation containing a rendered-image point."""
+    if rendered_size[0] < 1 or rendered_size[1] < 1:
+        return None
+    scale_x = result.image_size[0] / rendered_size[0]
+    scale_y = result.image_size[1] / rendered_size[1]
+    source_x, source_y = point[0] * scale_x, point[1] * scale_y
+    first_detection_index = 1 if result.anomaly_score is not None else 0
+    candidates = []
+    for position, detection in enumerate(result.detections):
+        left, top, right, bottom = detection.box
+        if left <= source_x <= right and top <= source_y <= bottom:
+            candidates.append(((right - left) * (bottom - top), first_detection_index + position))
+    if candidates:
+        return min(candidates)[1]
+    return 0 if result.anomaly_score is not None else None
+
+
 class FitImageCanvas(tk.Canvas):
     """Image canvas with fit-to-view, wheel zoom, and drag panning."""
 
@@ -47,14 +70,19 @@ class FitImageCanvas(tk.Canvas):
         self.pan_x = 0.0
         self.pan_y = 0.0
         self.drag_origin: tuple[int, int] | None = None
+        self.press_origin: tuple[int, int] | None = None
+        self.click_handler: Callable[[float, float], None] | None = None
         self.bind("<Configure>", lambda _: self._draw())
         self.bind("<MouseWheel>", self._zoom_image)
         self.bind("<Button-4>", lambda event: self._zoom_image(event, 1))
         self.bind("<Button-5>", lambda event: self._zoom_image(event, -1))
         self.bind("<ButtonPress-1>", self._start_pan)
         self.bind("<B1-Motion>", self._pan_image)
-        self.bind("<ButtonRelease-1>", lambda _: self.configure(cursor="crosshair"))
+        self.bind("<ButtonRelease-1>", self._finish_pan)
         self.bind("<Double-Button-1>", lambda _: self.reset_view())
+
+    def set_click_handler(self, handler: Callable[[float, float], None]) -> None:
+        self.click_handler = handler
 
     def set_image(self, image: Image.Image | None) -> None:
         self.source_image = image
@@ -82,6 +110,7 @@ class FitImageCanvas(tk.Canvas):
 
     def _start_pan(self, event: tk.Event) -> None:
         self.drag_origin = (event.x, event.y)
+        self.press_origin = self.drag_origin
         self.configure(cursor="fleur")
 
     def _pan_image(self, event: tk.Event) -> None:
@@ -91,6 +120,34 @@ class FitImageCanvas(tk.Canvas):
         self.pan_y += event.y - self.drag_origin[1]
         self.drag_origin = (event.x, event.y)
         self._draw()
+
+    def _finish_pan(self, event: tk.Event) -> None:
+        self.configure(cursor="crosshair")
+        press_origin = self.press_origin
+        self.drag_origin = None
+        self.press_origin = None
+        if press_origin is None or max(abs(event.x - press_origin[0]), abs(event.y - press_origin[1])) > 4:
+            return
+        point = self.image_coordinates(event.x, event.y)
+        if point is not None and self.click_handler is not None:
+            self.click_handler(*point)
+
+    def image_coordinates(self, canvas_x: float, canvas_y: float) -> tuple[float, float] | None:
+        if self.source_image is None:
+            return None
+        width = max(1, self.winfo_width() - 32)
+        height = max(1, self.winfo_height() - 32)
+        fit_scale = min(width / self.source_image.width, height / self.source_image.height)
+        scale = fit_scale * self.zoom
+        display_width = self.source_image.width * scale
+        display_height = self.source_image.height * scale
+        image_left = self.winfo_width() / 2 + self.pan_x - display_width / 2
+        image_top = self.winfo_height() / 2 + self.pan_y - display_height / 2
+        image_x = (canvas_x - image_left) / scale
+        image_y = (canvas_y - image_top) / scale
+        if not (0 <= image_x < self.source_image.width and 0 <= image_y < self.source_image.height):
+            return None
+        return image_x, image_y
 
     def _draw(self) -> None:
         self.delete("all")
@@ -205,6 +262,8 @@ class EchoSightApp(tk.Tk):
         self.current_result_index: int | None = None
         self.hidden_annotations: dict[int, set[int]] = {}
         self.secondary_hidden_annotations: dict[int, set[int]] = {}
+        self.selected_annotations: dict[int, set[int]] = {}
+        self.secondary_selected_annotations: dict[int, set[int]] = {}
         self.preprocess_profiles: dict[int, tuple[float, float, float, float]] = {}
         self.annotation_profiles: dict[int, RenderOptions] = {}
         self.annotation_variables: list[tk.BooleanVar] = []
@@ -236,6 +295,8 @@ class EchoSightApp(tk.Tk):
         self.show_labels = tk.BooleanVar(value=True)
         self.show_masks = tk.BooleanVar(value=True)
         self.show_heatmap = tk.BooleanVar(value=True)
+        self.show_all_annotations = tk.BooleanVar(value=True)
+        self.show_selected_annotations = tk.BooleanVar(value=False)
         self.annotation_font_size = tk.DoubleVar(value=10.0)
         self.annotation_thickness = tk.DoubleVar(value=3.0)
         self.annotation_transparency = tk.DoubleVar(value=0.0)
@@ -288,6 +349,7 @@ class EchoSightApp(tk.Tk):
         style.configure("Header.TLabel", background="#171717", foreground="#f2f3f4", font=("Segoe UI Variable Display Semibold", 18))
         style.configure("PanelTitle.TLabel", background="#222222", foreground="#eceeef", font=(font, 9, "bold"))
         style.configure("PanelText.TLabel", background="#222222", foreground="#b4b9be", font=(font, 9))
+        style.configure("SelectedAnnotation.TLabel", background="#4a4120", foreground="#ffe08a", font=(font, 9, "bold"), padding=(3, 2))
         style.configure("Accent.TButton", background="#36a269", foreground="#ffffff", borderwidth=0, padding=(14, 9), font=(font, 9, "bold"))
         style.map("Accent.TButton", background=[("active", "#42b879"), ("disabled", "#2d4738")], foreground=[("disabled", "#82978a")])
         style.configure("Load.TButton", background="#447fbd", foreground="#ffffff", borderwidth=0, padding=(14, 9), font=(font, 9, "bold"))
@@ -559,10 +621,12 @@ class EchoSightApp(tk.Tk):
         self.primary_result_title = ttk.Label(self.primary_result_panel, text="MODEL 1", style="PanelTitle.TLabel")
         self.primary_result_title.pack(anchor="w", padx=8, pady=(5, 0))
         self.results_canvas = FitImageCanvas(self.primary_result_panel)
+        self.results_canvas.set_click_handler(lambda x, y: self._select_annotation_at_point(0, x, y))
         self.results_canvas.pack(fill="both", expand=True)
         self.secondary_result_title = ttk.Label(self.secondary_result_panel, text="MODEL 2", style="PanelTitle.TLabel")
         self.secondary_result_title.pack(anchor="w", padx=8, pady=(5, 0))
         self.secondary_results_canvas = FitImageCanvas(self.secondary_result_panel)
+        self.secondary_results_canvas.set_click_handler(lambda x, y: self._select_annotation_at_point(1, x, y))
         self.secondary_results_canvas.pack(fill="both", expand=True)
         self.annotation_style_button = ttk.Button(
             result_viewer,
@@ -598,6 +662,21 @@ class EchoSightApp(tk.Tk):
         ttk.Label(detail_panel, text="OVERLAYS", style="PanelTitle.TLabel").pack(anchor="w")
         for text, variable in (("Bounding boxes", self.show_boxes), ("Labels", self.show_labels), ("Instance masks", self.show_masks), ("Anomaly heatmap", self.show_heatmap)):
             ttk.Checkbutton(detail_panel, text=text, variable=variable, command=self._refresh_annotation_views, style="Panel.TCheckbutton").pack(anchor="w")
+        ttk.Separator(detail_panel, orient="horizontal").pack(fill="x", pady=5)
+        ttk.Checkbutton(
+            detail_panel,
+            text="Show all annotations",
+            variable=self.show_all_annotations,
+            command=lambda: self._set_annotation_filter(False),
+            style="Panel.TCheckbutton",
+        ).pack(anchor="w")
+        ttk.Checkbutton(
+            detail_panel,
+            text="Show selected annotations",
+            variable=self.show_selected_annotations,
+            command=lambda: self._set_annotation_filter(True),
+            style="Panel.TCheckbutton",
+        ).pack(anchor="w")
         self.export_button = ttk.Button(
             detail_panel,
             text="Save All",
@@ -832,6 +911,8 @@ class EchoSightApp(tk.Tk):
         self.secondary_inference_failures.clear()
         self.hidden_annotations.clear()
         self.secondary_hidden_annotations.clear()
+        self.selected_annotations.clear()
+        self.secondary_selected_annotations.clear()
         self._clear_results_ui()
         self.model_name.set(f"Adding {parent.name}..." if append else parent.name)
         self._set_model_detail("Reading model metadata and preparing CPU compilation...")
@@ -996,6 +1077,8 @@ class EchoSightApp(tk.Tk):
         self.secondary_inference_failures.clear()
         self.hidden_annotations.clear()
         self.secondary_hidden_annotations.clear()
+        self.selected_annotations.clear()
+        self.secondary_selected_annotations.clear()
         self._set_secondary_view_visible(False)
         self._clear_results_ui()
         self._log("Model cleared | Loaded images retained")
@@ -1012,6 +1095,8 @@ class EchoSightApp(tk.Tk):
         self.secondary_inference_failures.clear()
         self.hidden_annotations.clear()
         self.secondary_hidden_annotations.clear()
+        self.selected_annotations.clear()
+        self.secondary_selected_annotations.clear()
         self.preprocess_profiles.clear()
         self.annotation_profiles.clear()
         self.annotation_variables.clear()
@@ -1174,6 +1259,8 @@ class EchoSightApp(tk.Tk):
         for index, _frame in frames:
             self.inference_failures.pop(index, None)
             self.secondary_inference_failures.pop(index, None)
+            self.selected_annotations.pop(index, None)
+            self.secondary_selected_annotations.pop(index, None)
         threading.Thread(target=self._inference_worker, args=(frames, settings), daemon=True).start()
         self.after(100, self._poll_inference)
 
@@ -1466,9 +1553,11 @@ class EchoSightApp(tk.Tk):
             self._preprocess_settings(index),
             self._render_options(index, live=True),
             self.results.get(index),
-            set(self.hidden_annotations.get(index, set())),
+            self._effective_hidden_annotations(0, index),
+            set(self.selected_annotations.get(index, set())),
             self.secondary_results.get(index),
-            set(self.secondary_hidden_annotations.get(index, set())),
+            self._effective_hidden_annotations(1, index),
+            set(self.secondary_selected_annotations.get(index, set())),
         )
         if not self.result_render_running:
             self._start_pending_result_render()
@@ -1491,13 +1580,15 @@ class EchoSightApp(tk.Tk):
         options: RenderOptions,
         primary: InferenceResult | None,
         primary_hidden: set[int],
+        primary_selected: set[int],
         secondary: InferenceResult | None,
         secondary_hidden: set[int],
+        secondary_selected: set[int],
     ) -> None:
         try:
             source = self._process_image(image, settings)
-            primary_image = render_result(source, primary, options, primary_hidden) if primary is not None else None
-            secondary_image = render_result(source, secondary, options, secondary_hidden) if secondary is not None else None
+            primary_image = render_result(source, primary, options, primary_hidden, primary_selected) if primary is not None else None
+            secondary_image = render_result(source, secondary, options, secondary_hidden, secondary_selected) if secondary is not None else None
             self.result_render_events.put((generation, index, primary_image, secondary_image))
         except Exception:
             LOGGER.exception("Result rendering failed")
@@ -1518,6 +1609,51 @@ class EchoSightApp(tk.Tk):
 
     def _refresh_annotation_views(self) -> None:
         self._refresh_result()
+
+    def _set_annotation_filter(self, selected_only: bool) -> None:
+        self.show_all_annotations.set(not selected_only)
+        self.show_selected_annotations.set(selected_only)
+        self._refresh_result()
+
+    def _effective_hidden_annotations(self, model_index: int, frame_index: int) -> set[int]:
+        result_store = self.results if model_index == 0 else self.secondary_results
+        hidden_store = self.hidden_annotations if model_index == 0 else self.secondary_hidden_annotations
+        selected_store = self.selected_annotations if model_index == 0 else self.secondary_selected_annotations
+        hidden = set(hidden_store.get(frame_index, set()))
+        result = result_store.get(frame_index)
+        if result is None or not self.show_selected_annotations.get():
+            return hidden
+        annotation_count = (1 if result.anomaly_score is not None else 0) + len(result.detections) + len(result.classifications)
+        return hidden | (set(range(annotation_count)) - selected_store.get(frame_index, set()))
+
+    def _select_annotation(self, model_index: int, annotation_index: int) -> None:
+        if self.current_result_index is None:
+            return
+        selected_store = self.selected_annotations if model_index == 0 else self.secondary_selected_annotations
+        selected = selected_store.setdefault(self.current_result_index, set())
+        selected.remove(annotation_index) if annotation_index in selected else selected.add(annotation_index)
+        self._show_annotation_page(self.current_result_index, model_index, annotation_index)
+        self._build_annotation_controls(self.current_result_index)
+        self._refresh_result()
+
+    def _select_annotation_at_point(self, model_index: int, image_x: float, image_y: float) -> None:
+        if self.current_result_index is None:
+            return
+        result_store = self.results if model_index == 0 else self.secondary_results
+        canvas = self.results_canvas if model_index == 0 else self.secondary_results_canvas
+        result = result_store.get(self.current_result_index)
+        if result is None or canvas.source_image is None:
+            return
+        annotation_index = annotation_at_point(result, (image_x, image_y), canvas.source_image.size)
+        if annotation_index is not None:
+            self._select_annotation(model_index, annotation_index)
+
+    def _show_annotation_page(self, frame_index: int, model_index: int, annotation_index: int) -> None:
+        position = annotation_index
+        if model_index == 1 and frame_index in self.results:
+            primary = self.results[frame_index]
+            position += (1 if primary.anomaly_score is not None else 0) + len(primary.detections) + len(primary.classifications)
+        self.annotation_page = position // ANNOTATIONS_PER_PAGE
 
     def _annotation_draft(self) -> RenderOptions:
         return RenderOptions(
@@ -1833,16 +1969,30 @@ class EchoSightApp(tk.Tk):
                 )
                 previous_model = model_index
             hidden_store = self.hidden_annotations if model_index == 0 else self.secondary_hidden_annotations
+            selected_store = self.selected_annotations if model_index == 0 else self.secondary_selected_annotations
             hidden = hidden_store.setdefault(frame_index, set())
+            selected = selected_store.setdefault(frame_index, set())
             variable = tk.BooleanVar(value=annotation_index not in hidden)
             self.annotation_variables.append(variable)
+            row = ttk.Frame(self.annotation_container, style="Panel.TFrame")
+            row.pack(fill="x", pady=1)
             ttk.Checkbutton(
-                self.annotation_container,
-                text=text,
+                row,
                 variable=variable,
                 command=lambda model=model_index, annotation=annotation_index, state=variable: self._toggle_annotation(model, annotation, state),
                 style="Panel.TCheckbutton",
-            ).pack(anchor="w", pady=2)
+            ).pack(side="left")
+            label = ttk.Label(
+                row,
+                text=text,
+                style="SelectedAnnotation.TLabel" if annotation_index in selected else "PanelText.TLabel",
+                cursor="hand2",
+            )
+            label.pack(side="left", fill="x", expand=True)
+            label.bind(
+                "<Button-1>",
+                lambda _event, model=model_index, annotation=annotation_index: self._select_annotation(model, annotation),
+            )
         if page_count > 1:
             navigation = ttk.Frame(self.annotation_container, style="Panel.TFrame")
             navigation.pack(fill="x", pady=(8, 2))
@@ -2057,6 +2207,8 @@ class EchoSightApp(tk.Tk):
             self.secondary_inference_failures.clear()
             self.hidden_annotations.clear()
             self.secondary_hidden_annotations.clear()
+            self.selected_annotations.clear()
+            self.secondary_selected_annotations.clear()
             self._clear_results_ui()
         self._refresh_model_detail()
         state = "active" if self._threshold_override_active() else "reset to model defaults"

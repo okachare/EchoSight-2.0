@@ -7,7 +7,12 @@ from unittest.mock import Mock, patch
 import numpy as np
 from PIL import Image
 
-from echosight2.desktop import MAX_CANVAS_ZOOM, EchoSightApp, FitImageCanvas
+from echosight2.desktop import (
+    MAX_CANVAS_ZOOM,
+    EchoSightApp,
+    FitImageCanvas,
+    annotation_at_point,
+)
 from echosight2.exporting import ExportReport
 from echosight2.frames import LoadedFrame
 from echosight2.inference import (
@@ -76,6 +81,8 @@ def test_threshold_override_applies_per_stage_and_resets_to_model_defaults() -> 
     app.secondary_inference_failures = {}
     app.hidden_annotations = {0: {1}}
     app.secondary_hidden_annotations = {}
+    app.selected_annotations = {0: {0}}
+    app.secondary_selected_annotations = {}
     app._clear_results_ui = Mock()
     app._refresh_model_detail = Mock()
     app._log = Mock()
@@ -90,6 +97,7 @@ def test_threshold_override_applies_per_stage_and_resets_to_model_defaults() -> 
     assert app.results == {}
     assert app.inference_failures == {}
     assert app.hidden_annotations == {}
+    assert app.selected_annotations == {}
 
     app._set_effective_thresholds((0.6, 0.5))
 
@@ -229,6 +237,56 @@ def test_annotation_visibility_is_isolated_per_model() -> None:
     app._refresh_result.assert_called_once_with()
 
 
+def test_annotation_hit_testing_selects_smallest_overlapping_box() -> None:
+    result = InferenceResult(
+        source=Path("inspection.tiff"),
+        task_type=TaskType.DETECTION,
+        image_size=(200, 100),
+        input_size=(32, 32),
+        duration_ms=4.0,
+        detections=(
+            Detection(0, "Large", 0.8, (20.0, 10.0, 180.0, 90.0)),
+            Detection(1, "Small", 0.9, (80.0, 40.0, 120.0, 60.0)),
+        ),
+    )
+
+    assert annotation_at_point(result, (50.0, 25.0), (100, 50)) == 1
+    assert annotation_at_point(result, (10.0, 5.0), (100, 50)) == 0
+    assert annotation_at_point(result, (2.0, 2.0), (100, 50)) is None
+
+
+def test_selected_only_filter_preserves_hidden_state_and_frame_isolation() -> None:
+    app = object.__new__(EchoSightApp)
+    app.results = {0: _result(0.91), 1: _result(0.72)}
+    app.secondary_results = {}
+    app.hidden_annotations = {0: {1}}
+    app.secondary_hidden_annotations = {}
+    app.selected_annotations = {0: {0}, 1: {1}}
+    app.secondary_selected_annotations = {}
+    app.show_selected_annotations = Mock(get=Mock(return_value=True))
+
+    assert app._effective_hidden_annotations(0, 0) == {1}
+    assert app._effective_hidden_annotations(0, 1) == {0}
+    assert app.hidden_annotations == {0: {1}}
+
+
+def test_annotation_selection_is_isolated_per_frame_and_model() -> None:
+    app = object.__new__(EchoSightApp)
+    app.current_result_index = 3
+    app.selected_annotations = {2: {0}}
+    app.secondary_selected_annotations = {}
+    app._show_annotation_page = Mock()
+    app._build_annotation_controls = Mock()
+    app._refresh_result = Mock()
+
+    app._select_annotation(1, 2)
+
+    assert app.selected_annotations == {2: {0}}
+    assert app.secondary_selected_annotations == {3: {2}}
+    app._show_annotation_page.assert_called_once_with(3, 1, 2)
+    app._refresh_result.assert_called_once_with()
+
+
 def test_canvas_zoom_reaches_high_magnification_without_exceeding_bound() -> None:
     canvas = object.__new__(FitImageCanvas)
     canvas.source_image = Image.new("RGB", (100, 100))
@@ -255,6 +313,9 @@ def test_result_redraw_coalesces_to_latest_request() -> None:
     app.secondary_results = {}
     app.hidden_annotations = {}
     app.secondary_hidden_annotations = {}
+    app.selected_annotations = {0: {0}}
+    app.secondary_selected_annotations = {}
+    app.show_selected_annotations = Mock(get=Mock(return_value=False))
     app.result_render_generation = 0
     app.result_render_running = True
     app.pending_result_render = None
@@ -270,6 +331,7 @@ def test_result_redraw_coalesces_to_latest_request() -> None:
     assert first is not app.pending_result_render
     assert app.pending_result_render[0] == 2
     assert app.pending_result_render[6] == {0}
+    assert app.pending_result_render[7] == {0}
     app._start_pending_result_render.assert_not_called()
 
 
@@ -293,6 +355,8 @@ def test_clear_model_retains_images_and_clears_model_results() -> None:
     app.secondary_inference_failures = {}
     app.hidden_annotations = {0: {1}}
     app.secondary_hidden_annotations = {}
+    app.selected_annotations = {0: {0}}
+    app.secondary_selected_annotations = {}
     app.threshold_override_enabled = Mock()
     app.threshold_variables = [Mock()]
     app.model_name = Mock()
@@ -311,6 +375,7 @@ def test_clear_model_retains_images_and_clears_model_results() -> None:
     assert app.inference_engine is None
     assert app.results == {}
     assert app.inference_failures == {}
+    assert app.selected_annotations == {}
     app.model_name.set.assert_called_once_with("No model loaded")
 
 
@@ -326,6 +391,8 @@ def test_clear_images_retains_model_and_clears_frame_state() -> None:
     app.secondary_inference_failures = {}
     app.hidden_annotations = {0: {1}}
     app.secondary_hidden_annotations = {}
+    app.selected_annotations = {0: {0}}
+    app.secondary_selected_annotations = {}
     app.preprocess_profiles = {0: (1.0, 1.0, 1.0, 0.0)}
     app.annotation_profiles = {0: RenderOptions()}
     app.annotation_variables = [Mock()]
@@ -344,6 +411,7 @@ def test_clear_images_retains_model_and_clears_frame_state() -> None:
     assert app.model_info is not None
     assert app.frames == []
     assert app.results == {}
+    assert app.selected_annotations == {}
     assert app.preprocess_profiles == {}
     app.analysis_canvas.set_image.assert_called_once_with(None)
 

@@ -35,6 +35,7 @@ COLORS = (
     (170, 126, 240),
 )
 DETECTION_COLOR = COLORS[0]
+SELECTION_COLOR = (255, 211, 67)
 
 
 def render_result(
@@ -42,23 +43,58 @@ def render_result(
     result: InferenceResult,
     options: RenderOptions | None = None,
     hidden_annotations: set[int] | None = None,
+    selected_annotations: set[int] | None = None,
 ) -> Image.Image:
     options = options or RenderOptions()
     hidden = hidden_annotations or set()
+    selected = selected_annotations or set()
     rendered = source.convert("RGB").copy()
     occupied_labels = _LabelOccupancy()
+    next_index = 0
 
-    if result.task_type is TaskType.ANOMALY and result.anomaly_map is not None and options.show_heatmap and 0 not in hidden:
+    if result.anomaly_score is not None:
+        anomaly_index = next_index
+        next_index += 1
+    else:
+        anomaly_index = None
+
+    if result.task_type is TaskType.ANOMALY and result.anomaly_map is not None and options.show_heatmap and anomaly_index not in hidden:
         rendered = _render_anomaly_map(rendered, result.anomaly_map, options.overlay_opacity)
 
-    for index, detection in enumerate(result.detections):
+    for position, detection in enumerate(result.detections):
+        index = next_index + position
         if index in hidden:
             continue
-        rendered = _render_detection(rendered, _scale_detection(detection, result.image_size, rendered.size), options, occupied_labels)
+        rendered = _render_detection(
+            rendered,
+            _scale_detection(detection, result.image_size, rendered.size),
+            options,
+            occupied_labels,
+            selected=index in selected,
+        )
+    next_index += len(result.detections)
 
-    if options.show_labels and result.task_type is TaskType.ANOMALY and result.anomaly_score is not None and 0 not in hidden:
-        color = options.annotation_color or COLORS[3]
+    if options.show_labels and anomaly_index is not None and anomaly_index not in hidden:
+        color = SELECTION_COLOR if anomaly_index in selected else options.annotation_color or COLORS[3]
         rendered = _draw_label(rendered, (8, 8), f"Anomaly {result.anomaly_score:.1%}", color, options)
+
+    if anomaly_index is not None and anomaly_index in selected and anomaly_index not in hidden:
+        rendered = _draw_box(rendered, (1, 1, rendered.width - 2, rendered.height - 2), SELECTION_COLOR, 5, 1.0)
+
+    if options.show_labels:
+        for position, classification in enumerate(result.classifications):
+            index = next_index + position
+            if index in hidden:
+                continue
+            color = SELECTION_COLOR if index in selected else options.annotation_color or COLORS[2]
+            rendered = _draw_label(
+                rendered,
+                (8, 8 + (position + (1 if anomaly_index is not None else 0)) * (options.font_size + 10)),
+                f"Classification | {classification.label} | {_format_confidence(classification.confidence)}",
+                color,
+                options,
+                occupied=occupied_labels,
+            )
 
     return rendered
 
@@ -87,6 +123,7 @@ def _render_detection(
     detection: Detection,
     options: RenderOptions,
     occupied_labels: _LabelOccupancy | None = None,
+    selected: bool = False,
 ) -> Image.Image:
     rendered = image
     if options.annotation_color is not None:
@@ -112,6 +149,14 @@ def _render_detection(
 
     if options.show_boxes:
         rendered = _draw_box(rendered, (x1, y1, x2, y2), color, options.annotation_thickness, options.annotation_opacity)
+    if selected:
+        rendered = _draw_box(
+            rendered,
+            (x1, y1, x2, y2),
+            SELECTION_COLOR,
+            max(5, options.annotation_thickness + 3),
+            1.0,
+        )
     if options.show_labels:
         stage = "Classification" if detection.stage == "classification" else "Detection"
         label = f"{stage} | {detection.label} | {_format_confidence(detection.confidence)}"
@@ -119,7 +164,7 @@ def _render_detection(
             rendered,
             (x1, y1 + detection.stage_index * (options.font_size + 10)),
             label,
-            color,
+            SELECTION_COLOR if selected else color,
             options,
             above=detection.stage != "classification",
             occupied=occupied_labels,

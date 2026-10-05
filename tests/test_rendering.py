@@ -94,6 +94,22 @@ def test_chained_stages_use_distinct_default_box_colors() -> None:
     assert tuple(rendered[23, 23]) == (83, 154, 255)
 
 
+def test_selected_annotation_receives_high_contrast_highlight() -> None:
+    source = Image.new("RGB", (100, 80), "black")
+    detection = Detection(0, "defect", 0.9, (20, 15, 70, 60))
+
+    rendered = np.asarray(
+        render_result(
+            source,
+            _result(TaskType.DETECTION, detections=(detection,)),
+            RenderOptions(show_labels=False),
+            selected_annotations={0},
+        )
+    )
+
+    assert tuple(rendered[15, 20]) == rendering.SELECTION_COLOR
+
+
 def test_label_layout_avoids_overlapping_stage_labels() -> None:
     occupied = [(20, 20, 90, 35)]
 

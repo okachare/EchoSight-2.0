@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased] - 2026-10-02
+## [Unreleased] - 2026-10-05
 
 ### Published
 - Synchronized the current EchoSight 2.0 source and operator documentation to `okachare/EchoSight-2.0` and `okachare/GeTi_CSAM_PVA`.
@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Side-by-side **Clear Model** and **Clear Images** controls that preserve the unaffected resource and remove dependent results safely.
 - A themed **Save Terminal Log** action for exporting the visible session log to a user-selected UTF-8 file.
 - Native dark title-bar styling on supported Windows versions, with legacy DWM fallback.
+- Per-frame and per-model annotation selection from the annotation list or Results image, bidirectional gold highlighting, and **Show all annotations** / **Show selected annotations** overlay filters for dense result review.
 
 ### Changed
 - Renamed **Load Model Folder** to **Load Model**.
@@ -61,7 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prevented stale background annotation renders from repainting Results after model, image, or result state is cleared.
 
 ### Validated
-- All 73 automated tests pass, including exact giant-image tile pixels, tiled remapping and cancellation, high-magnification viewport zoom, asynchronous annotation rendering, scrollable result details, chained and independent model execution, split rendering, per-model visibility and exports, Windows title-bar integration, resource clearing, and retraining safeguards.
+- All 77 automated tests pass, including annotation hit-testing and selection isolation, exact giant-image tile pixels, tiled remapping and cancellation, high-magnification viewport zoom, asynchronous annotation rendering, scrollable result details, chained and independent model execution, split rendering, per-model visibility and exports, Windows title-bar integration, resource clearing, and retraining safeguards.
 - The Results image panel receives the dominant width in a real 3840-pixel Tk layout check.
 - The real `NCL_S_ChainedModel_Test` package compiled both models, produced three detector ROIs, classified every crop, rendered 12 ordered stage annotations, and preserved both model hashes in exports.
 
