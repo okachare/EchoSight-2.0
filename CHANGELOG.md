@@ -241,6 +241,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-For detailed commit history, see [GitHub Commits](https://github.com/okachare/EchoSight/commits/main)
+For detailed commit history, see [GitHub Commits](https://github.com/okachare/EchoSight-2.0/commits/main)
 
-For issues and feature requests, see [GitHub Issues](https://github.com/okachare/EchoSight/issues)
+For issues and feature requests, see [GitHub Issues](https://github.com/okachare/EchoSight-2.0/issues)

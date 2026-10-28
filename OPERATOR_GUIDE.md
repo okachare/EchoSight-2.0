@@ -11,9 +11,13 @@
 
 Setup is required once for each Windows user profile and requires Python 3.9 plus access to the configured Python package source. Dependencies are installed under `%LOCALAPPDATA%\EchoSight\2.0`; the shared application files are not modified.
 
+The source setup is not fully offline because `pip` must resolve the runtime packages. On an isolated work system, use the verified `EchoSight2-2.0.1-windows-x64.zip` portable package instead: verify SHA-256 `77c76b794130c564cac0661f2f76961429e17afc33c758e98b802575b415a37f`, extract it locally, and run `EchoSight2.exe`. The portable package requires neither Python nor internet access.
+
 ### Later use
 
 Double-click `Launch_EchoSight.bat` in the shared folder. Run `SETUP.ps1` again only when setup reports a problem or the published requirements change.
+
+Release validation: 90 workspace tests pass with 3 expected private-fixture skips. The shared 2.0.1 deployment contains 23 manifest-tracked files with zero hash mismatches, and packaged dependency diagnostics pass.
 
 ## Inspect Images
 
@@ -69,6 +73,8 @@ The Results table can be sorted by frame, task type, annotation count, or highes
 EchoSight creates one 16:9 slide for each source TIFF/VID and places up to three selected frames on that slide. Replace the highlighted Image Description placeholder beneath each image with the appropriate description. The VID is read from a `Z` identifier in the TIFF filename; when no explicit identifier is present, the trailing five digits become `Z#####`. Hidden annotations are omitted, while visible annotations retain their active boxes, masks, labels, confidence values, colors, opacity, and line styling. If two model packages are loaded, their visible outputs are shown side by side for that frame.
 
 Each slide uses one compact, highlighted, editable field for each entry: Sighting, Visual ID, Comments, and each Image Description. The label and value remain together when the field is edited or moved, and the initial field does not stretch across unused slide area. Delete the AI-verification notice only after an engineer confirms the generated results. The presentation author comes from the current Microsoft Office user profile, or the Windows user name when an Office profile is unavailable.
+
+PowerPoint is not required to generate the `.pptx`. If no compatible presentation application is registered, EchoSight saves the report and displays its path instead of opening it automatically.
 
 The report keeps Sighting and Visual ID together at the top of every slide. It automatically chooses a horizontal, vertical, or mixed image arrangement according to the number and shape of the images, placing Comments at the side or bottom to maximize image area without overlapping descriptions or report fields.
 
