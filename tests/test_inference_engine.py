@@ -2,8 +2,6 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from PIL import Image
-
 from echosight2.inference import (
     InferenceEngine,
     ModelInfo,
@@ -11,6 +9,7 @@ from echosight2.inference import (
     TaskType,
     TensorInfo,
 )
+from PIL import Image
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
 DETECTION_MODEL = WORKSPACE_ROOT / "Deployment" / "Test_Run_Detect" / "deployment" / "Detection" / "model" / "model.xml"

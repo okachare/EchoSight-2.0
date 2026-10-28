@@ -1,11 +1,10 @@
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
-
 from echosight2 import rendering
 from echosight2.inference import Detection, InferenceResult, TaskType
 from echosight2.rendering import RenderOptions, render_result
+from PIL import Image
 
 
 def _result(task_type: TaskType, **values: object) -> InferenceResult:

@@ -57,6 +57,21 @@ The Results table can be sorted by frame, task type, annotation count, or highes
 
 **Result Details** retains every annotation-specific line in a fixed-height scrollable area. Use its scrollbar or mouse wheel to review entries beyond the visible field of view. Annotation checkbox changes and style adjustments render in the background; when several changes are made quickly, EchoSight applies the newest state instead of processing obsolete redraws.
 
+## Generate a PowerPoint Report
+
+1. In Results, Ctrl-click or Shift-click the required frame rows, selecting no more than three frames from each source TIFF.
+2. Open each selected frame and clear the checkbox for every annotation that should be hidden.
+3. Confirm the active overlays and annotation styling show the intended evidence.
+4. Select **Generate Report**.
+5. Choose the `.pptx` destination and review the presentation when it opens in PowerPoint.
+6. Replace the highlighted Sighting and Comments placeholders directly in each slide.
+
+EchoSight creates one 16:9 slide for each source TIFF/VID and places up to three selected frames on that slide. Replace the highlighted Image Description placeholder beneath each image with the appropriate description. The VID is read from a `Z` identifier in the TIFF filename; when no explicit identifier is present, the trailing five digits become `Z#####`. Hidden annotations are omitted, while visible annotations retain their active boxes, masks, labels, confidence values, colors, opacity, and line styling. If two model packages are loaded, their visible outputs are shown side by side for that frame.
+
+Each slide uses one compact, highlighted, editable field for each entry: Sighting, Visual ID, Comments, and each Image Description. The label and value remain together when the field is edited or moved, and the initial field does not stretch across unused slide area. Delete the AI-verification notice only after an engineer confirms the generated results. The presentation author comes from the current Microsoft Office user profile, or the Windows user name when an Office profile is unavailable.
+
+The report keeps Sighting and Visual ID together at the top of every slide. It automatically chooses a horizontal, vertical, or mixed image arrangement according to the number and shape of the images, placing Comments at the side or bottom to maximize image area without overlapping descriptions or report fields.
+
 ## Mark Frames for Retraining
 
 1. In Results, select one or more frames. Use Ctrl or Shift to select multiple rows.

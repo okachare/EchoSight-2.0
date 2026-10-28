@@ -4,8 +4,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
-
 from echosight2.exporting import export_run
 from echosight2.frames import LoadedFrame
 from echosight2.inference import (
@@ -16,6 +14,7 @@ from echosight2.inference import (
     TensorInfo,
 )
 from echosight2.rendering import RenderOptions
+from PIL import Image
 
 
 def _model_info(model_path: Path, task: TaskType = TaskType.DETECTION) -> ModelInfo:

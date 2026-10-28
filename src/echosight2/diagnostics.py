@@ -38,6 +38,7 @@ def collect_environment() -> dict[str, object]:
             "Pillow": _package_version("PIL"),
             "openvino": _package_version("openvino"),
             "onnxruntime": _package_version("onnxruntime"),
+            "python-pptx": _package_version("pptx"),
         },
     }
 

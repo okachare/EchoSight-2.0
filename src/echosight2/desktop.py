@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import os
 import queue
 import sys
 import threading
@@ -29,12 +30,24 @@ from .inference import (
     infer_frame,
 )
 from .rendering import RenderOptions, render_result
+from .reporting import (
+    PowerPointReport,
+    ReportImage,
+    ReportSlide,
+    generate_powerpoint_report,
+    powerpoint_author,
+    render_report_image,
+    visual_id_from_path,
+)
 from .runtime import log_directory
 from .training import export_training_frames
 
 LOGGER = logging.getLogger(__name__)
 ANNOTATIONS_PER_PAGE = 100
 MAX_CANVAS_ZOOM = 1024.0
+ReportModelPayload = tuple[str, InferenceResult, set[int]]
+ReportFramePayload = tuple[Image.Image, tuple[float, float, float, float], RenderOptions, list[ReportModelPayload]]
+ReportSlidePayload = tuple[str, list[ReportFramePayload]]
 
 
 def annotation_at_point(
@@ -290,6 +303,7 @@ class EchoSightApp(tk.Tk):
         self.image_events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.inference_events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.export_events: queue.Queue[tuple[str, object]] = queue.Queue()
+        self.report_events: queue.Queue[tuple[str, object]] = queue.Queue()
 
         self.show_boxes = tk.BooleanVar(value=True)
         self.show_labels = tk.BooleanVar(value=True)
@@ -592,10 +606,25 @@ class EchoSightApp(tk.Tk):
         panes.pack(fill="both", expand=True)
         result_list_panel = ttk.Frame(panes, style="Panel.TFrame", padding=12)
         result_viewer = ttk.Frame(panes, style="Panel.TFrame")
-        detail_panel = ttk.Frame(panes, style="Panel.TFrame", padding=12)
+        detail_shell = ttk.Frame(panes, style="Panel.TFrame")
+        self.results_sidebar_canvas = tk.Canvas(detail_shell, background="#222222", borderwidth=0, highlightthickness=0, width=305)
+        self.results_sidebar_scrollbar = ttk.Scrollbar(detail_shell, orient="vertical", command=self.results_sidebar_canvas.yview)
+        detail_panel = ttk.Frame(self.results_sidebar_canvas, style="Panel.TFrame", padding=12)
+        detail_window = self.results_sidebar_canvas.create_window((0, 0), window=detail_panel, anchor="nw")
+        self.results_sidebar_canvas.configure(yscrollcommand=self.results_sidebar_scrollbar.set)
+        detail_panel.bind(
+            "<Configure>",
+            lambda _event: self.results_sidebar_canvas.configure(scrollregion=self.results_sidebar_canvas.bbox("all")),
+        )
+        self.results_sidebar_canvas.bind(
+            "<Configure>",
+            lambda event: self.results_sidebar_canvas.itemconfigure(detail_window, width=event.width),
+        )
+        self.results_sidebar_canvas.pack(side="left", fill="both", expand=True)
+        self.results_sidebar_scrollbar.pack(side="right", fill="y")
         panes.add(result_list_panel, weight=0)
         panes.add(result_viewer, weight=1)
-        panes.add(detail_panel, weight=0)
+        panes.add(detail_shell, weight=0)
 
         ttk.Label(result_list_panel, text="RESULT FRAMES", style="PanelTitle.TLabel").pack(anchor="w", pady=(0, 8))
         columns = ("frame", "type", "annotations", "confidence")
@@ -693,6 +722,14 @@ class EchoSightApp(tk.Tk):
             command=lambda: self._select_export_destination(current_only=True),
         )
         self.export_current_button.pack(fill="x", pady=(6, 0))
+        self.generate_report_button = ttk.Button(
+            detail_panel,
+            text="Generate Report",
+            style="Accent.TButton",
+            state="disabled",
+            command=self._generate_report,
+        )
+        self.generate_report_button.pack(fill="x", pady=(6, 0))
         ttk.Label(detail_panel, text="MODEL RETRAINING", style="PanelTitle.TLabel").pack(anchor="w", pady=(14, 5))
         self.mark_false_hits_button = ttk.Button(
             detail_panel,
@@ -1805,10 +1842,123 @@ class EchoSightApp(tk.Tk):
         return sorted(int(item) for item in self.result_list.selection() if int(item) in indexes)
 
     def _update_training_button_state(self) -> None:
-        enabled = bool(self.result_list.selection()) and not self.inference_running and not self.export_running
+        selected_count = len(self.result_list.selection())
+        enabled = selected_count > 0 and not self.inference_running and not self.export_running
         state = "normal" if enabled else "disabled"
         self.mark_false_hits_button.configure(state=state)
         self.mark_misses_button.configure(state=state)
+        indexes = self._selected_result_indexes()
+        groups = self._report_groups(indexes)
+        report_enabled = bool(groups) and all(len(group_indexes) <= 3 for _source, group_indexes in groups)
+        report_enabled = report_enabled and not self.inference_running and not self.export_running
+        self.generate_report_button.configure(state="normal" if report_enabled else "disabled")
+
+    def _generate_report(self) -> None:
+        indexes = self._selected_result_indexes()
+        groups = self._report_groups(indexes)
+        if not groups:
+            messagebox.showinfo("Generate Report", "Select one or more result frames first.")
+            return
+        oversized = [visual_id_from_path(source) for source, group_indexes in groups if len(group_indexes) > 3]
+        if oversized:
+            messagebox.showinfo(
+                "Generate Report",
+                f"Select no more than three frames for each VID.\n\nReview: {', '.join(oversized)}",
+            )
+            return
+
+        report_name = visual_id_from_path(groups[0][0]) if len(groups) == 1 else "EchoSight_Multi_VID"
+        selected = filedialog.asksaveasfilename(
+            title="Save PowerPoint report",
+            defaultextension=".pptx",
+            filetypes=[("PowerPoint Presentation", "*.pptx")],
+            initialfile=f"{report_name}_Report.pptx",
+        )
+        if not selected:
+            return
+
+        payload: list[ReportSlidePayload] = []
+        for source, group_indexes in groups:
+            frame_payload: list[ReportFramePayload] = []
+            for index in group_indexes:
+                models = []
+                for model_index, result in self._frame_results(index):
+                    hidden_store = self.hidden_annotations if model_index == 0 else self.secondary_hidden_annotations
+                    models.append((self.model_parents[model_index].name, result, set(hidden_store.get(index, set()))))
+                frame_payload.append(
+                    (
+                        self.frames[index].image,
+                        self._preprocess_settings(index),
+                        self._render_options(index),
+                        models,
+                    )
+                )
+            payload.append((visual_id_from_path(source), frame_payload))
+
+        author = powerpoint_author()
+        self.export_running = True
+        self.load_model_button.configure(state="disabled")
+        self.open_images_button.configure(state="disabled")
+        self._update_run_state()
+        self._set_activity("Generating PowerPoint report", True)
+        self._log(f"Report started | {len(indexes)} frame(s) | {len(groups)} VID(s) | author: {author}")
+        threading.Thread(
+            target=self._report_worker,
+            args=(Path(selected), payload, author),
+            daemon=True,
+        ).start()
+        self.after(100, self._poll_report)
+
+    def _report_worker(
+        self,
+        destination: Path,
+        payload: list[ReportSlidePayload],
+        author: str,
+    ) -> None:
+        try:
+            report_slides = []
+            for visual_id, frames in payload:
+                report_images = []
+                for image, settings, options, models in frames:
+                    source = self._process_image(image, settings)
+                    report_images.append(ReportImage(render_report_image(source, options, models)))
+                report_slides.append(ReportSlide(visual_id, tuple(report_images)))
+            report = generate_powerpoint_report(destination, report_slides, author)
+            self.report_events.put(("complete", report))
+        except Exception as error:
+            LOGGER.exception("PowerPoint report generation failed")
+            self.report_events.put(("error", error))
+
+    def _poll_report(self) -> None:
+        try:
+            event, payload = self.report_events.get_nowait()
+        except queue.Empty:
+            self.after(100, self._poll_report)
+            return
+        self.export_running = False
+        self.load_model_button.configure(state="normal")
+        self.open_images_button.configure(state="normal")
+        self._set_activity("Ready", False)
+        self._update_run_state()
+        if event == "error":
+            self._log(f"ERROR | Report generation failed: {payload}")
+            messagebox.showerror("Generate Report", str(payload))
+            return
+
+        report: PowerPointReport = payload
+        self.status_text.set(f"Report generated: {report.path}")
+        self._log(f"Report generated | {report.image_count} frame(s) | {report.slide_count} VID slide(s) | {report.path}")
+        try:
+            os.startfile(report.path)
+        except OSError as error:
+            self._log(f"Report saved but could not be opened automatically | {error}")
+            messagebox.showinfo("Report generated", f"Report saved successfully.\n\n{report.path}")
+
+    def _report_groups(self, indexes: list[int]) -> list[tuple[Path, list[int]]]:
+        grouped: dict[Path, list[int]] = {}
+        for index in indexes:
+            grouped.setdefault(self.frames[index].source, []).append(index)
+        return list(grouped.items())
 
     def _export_worker(
         self,

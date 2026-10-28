@@ -2,8 +2,6 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
-from PIL import Image
-
 from echosight2.inference import (
     ChainedInferenceEngine,
     Classification,
@@ -14,6 +12,7 @@ from echosight2.inference import (
     TensorInfo,
     discover_detection_classification_chain,
 )
+from PIL import Image
 
 
 def _info(task: TaskType, threshold: float = 0.5) -> ModelInfo:

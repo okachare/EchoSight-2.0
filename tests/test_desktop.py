@@ -5,8 +5,6 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import numpy as np
-from PIL import Image
-
 from echosight2.desktop import (
     MAX_CANVAS_ZOOM,
     EchoSightApp,
@@ -25,6 +23,7 @@ from echosight2.inference import (
 )
 from echosight2.rendering import RenderOptions
 from echosight2.training import TrainingExport
+from PIL import Image
 
 
 def _result(confidence: float) -> InferenceResult:
@@ -141,6 +140,58 @@ def test_secondary_export_payload_is_independent_from_primary_results() -> None:
     assert current_failures == {}
     assert all_results == app.secondary_results
     assert all_failures == app.secondary_inference_failures
+
+
+def test_report_groups_selected_frames_by_source_tiff() -> None:
+    app = object.__new__(EchoSightApp)
+    first_source = Path("NVL N2P MIM MRB") / "D6N07R7400095.tiff"
+    second_source = Path("NVL N2P MIM MRB") / "scan_Z00102.tiff"
+    app.frames = [
+        LoadedFrame(first_source, 13, 50, Image.new("RGB", (8, 6))),
+        LoadedFrame(first_source, 24, 50, Image.new("RGB", (8, 6))),
+        LoadedFrame(second_source, 31, 50, Image.new("RGB", (8, 6))),
+    ]
+
+    assert app._report_groups([0, 1, 2]) == [(first_source, [0, 1]), (second_source, [2])]
+
+
+def test_report_button_accepts_three_frames_for_each_of_three_vids() -> None:
+    app = object.__new__(EchoSightApp)
+    app.inference_running = False
+    app.export_running = False
+    app.frames = [
+        LoadedFrame(Path(f"unit_Z0000{index // 3}.tiff"), index % 3 + 1, 3, Image.new("RGB", (8, 6)))
+        for index in range(9)
+    ]
+    app.results = {index: _result(0.91) for index in range(9)}
+    app.secondary_results = {}
+    app.result_list = Mock(selection=Mock(return_value=tuple(str(index) for index in range(9))))
+    app.mark_false_hits_button = Mock()
+    app.mark_misses_button = Mock()
+    app.generate_report_button = Mock()
+
+    app._update_training_button_state()
+
+    app.mark_false_hits_button.configure.assert_called_once_with(state="normal")
+    app.generate_report_button.configure.assert_called_once_with(state="normal")
+
+
+def test_report_button_rejects_more_than_three_frames_for_one_vid() -> None:
+    app = object.__new__(EchoSightApp)
+    app.inference_running = False
+    app.export_running = False
+    source = Path("unit_Z00001.tiff")
+    app.frames = [LoadedFrame(source, index + 1, 4, Image.new("RGB", (8, 6))) for index in range(4)]
+    app.results = {index: _result(0.91) for index in range(4)}
+    app.secondary_results = {}
+    app.result_list = Mock(selection=Mock(return_value=("0", "1", "2", "3")))
+    app.mark_false_hits_button = Mock()
+    app.mark_misses_button = Mock()
+    app.generate_report_button = Mock()
+
+    app._update_training_button_state()
+
+    app.generate_report_button.configure.assert_called_once_with(state="disabled")
 
 
 def test_current_export_does_not_include_other_frames_from_missing_model() -> None:

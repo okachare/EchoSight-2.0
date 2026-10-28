@@ -1,12 +1,11 @@
 from pathlib import Path
 from unittest.mock import Mock
 
-from PIL import Image
-
 import echosight2.frames as frame_module
 from echosight2.frames import load_frames
 from echosight2.inference import Detection, InferenceResult, TaskType, infer_frame
 from echosight2.inference.tiled import _non_maximum_suppression
+from PIL import Image
 
 
 def test_tiled_inference_remaps_and_deduplicates_detections(tmp_path: Path, monkeypatch) -> None:

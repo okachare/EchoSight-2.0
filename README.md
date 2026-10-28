@@ -70,6 +70,7 @@ The model's embedded confidence threshold remains the default. Experienced revie
 - Per-frame annotation visibility controls
 - Per-frame, per-model annotation selection from either the annotation list or Results image, with a high-contrast highlight and **Show selected annotations** filtering for dense results
 - Per-frame or all-frame Annotation Control for Calibri label size, annotation color, line thickness, and independent annotation/label transparency
+- One-click 16:9 PowerPoint reports for one to three selected Results frames, preserving active annotation styling and excluding hidden annotations
 - Multi-select Results actions that save original frames as False Hits or Misses for model retraining
 - Mouse-wheel zoom, drag-to-pan, and double-click fit reset in both previews
 - Results zoom up to 1024x with viewport-only rendering for detailed wafer inspection
@@ -90,6 +91,16 @@ Use **Save All** or **Save Current** in the Results tab to choose a destination 
 - `run_manifest.json` with model hashes, package metadata, preprocessing, overlays, per-frame results, timings, summaries, and failures.
 
 Inference continues after an individual frame failure so successful frames and failure details remain available in the same run record.
+
+## PowerPoint Reports
+
+Ctrl-click or Shift-click the required Results rows, with up to three selected frames from each source TIFF, hide any annotations that should not be included, and select **Generate Report**. EchoSight groups the selected frames by source TIFF and creates one consistently formatted 16:9 slide per VID. Each image has a highlighted, editable Image Description placeholder so the author can identify the image without tying the report to a particular inspection domain. The VID is extracted from a `Z` identifier in the filename or from its trailing five digits.
+
+Each slide contains one compact, highlighted, editable text field for each entry, combining its label and value so formatting remains consistent while the author updates Sighting, Visual ID, and Comments directly in PowerPoint. Fields are sized to their initial text rather than stretched across unused slide area. Slides preserve active preprocessing, overlays, and annotation styling while excluding hidden annotations. Dual-model results are placed side by side within the corresponding frame image. Each slide includes an editable AI-verification notice at the lower right that the engineer can delete after validating the results.
+
+The slide layout adapts to the number and aspect ratios of the selected images, including the wider output produced when two models are shown side by side. Sighting and Visual ID remain in a consistent header at the top of every slide. EchoSight evaluates horizontal, vertical, and mixed-grid arrangements with either side or bottom comments, then uses the non-overlapping layout that provides the greatest displayed image area.
+
+The presentation author is read from the current Microsoft Office user profile, with the Windows user name as a fallback. After saving, EchoSight opens the report in the system's registered PowerPoint application.
 
 ## Principles
 

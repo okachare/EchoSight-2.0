@@ -1,10 +1,9 @@
 from pathlib import Path
 
-import pytest
-from PIL import Image
-
 import echosight2.frames as frame_module
+import pytest
 from echosight2.frames import iter_frame_tiles, load_frames
+from PIL import Image
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
 MULTIFRAME_TIFF = WORKSPACE_ROOT / "TiffSplitter" / "samples" / "ARL_Test.TIFF"
