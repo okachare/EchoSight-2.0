@@ -13,6 +13,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 from pptx import Presentation
+from pptx.enum.dml import MSO_THEME_COLOR
 from pptx.enum.text import PP_ALIGN
 from pptx.util import Inches, Pt
 
@@ -404,9 +405,7 @@ def _add_highlighted_text(
     paragraph.alignment = alignment
     run = paragraph.add_run()
     run.text = text
-    run.font.name = "Calibri"
-    run.font.size = Pt(font_size)
-    run.font.color.rgb = _rgb(0, 0, 0)
+    _apply_default_font_style(run, font_size)
 
 
 def _add_text(
@@ -432,10 +431,14 @@ def _add_text(
     paragraph.alignment = alignment
     run = paragraph.add_run()
     run.text = text
-    run.font.name = "Calibri"
+    _apply_default_font_style(run, font_size, bold)
+
+
+def _apply_default_font_style(run: object, font_size: int, bold: bool = False) -> None:
+    run.font.name = "+mn-lt"
     run.font.size = Pt(font_size)
     run.font.bold = bold
-    run.font.color.rgb = _rgb(0, 0, 0)
+    run.font.color.theme_color = MSO_THEME_COLOR.TEXT_1
 
 
 def _rgb(red: int, green: int, blue: int) -> object:

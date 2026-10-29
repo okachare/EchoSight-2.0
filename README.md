@@ -6,7 +6,7 @@ EchoSight 2.0 is a clean rebuild of the EchoSight deployment tool. The applicati
 
 ## Current Status
 
-EchoSight 2.0.3 was published on 2026-10-29. It provides parent-folder model discovery, package-collateral inspection, model-driven preprocessing and thresholds, CPU inference, normalized task-specific results, responsive background execution, a resizable Analysis/Results interface, reproducible run export, retraining feedback, and adaptive PowerPoint reporting.
+EchoSight 2.0.4 was published on 2026-10-29. It provides parent-folder model discovery, package-collateral inspection, model-driven preprocessing and thresholds, CPU inference, normalized task-specific results, responsive background execution, a resizable Analysis/Results interface, reproducible run export, retraining feedback, and adaptive PowerPoint reporting.
 
 Multi-frame TIFF pages are expanded into independent in-memory frames. Each frame can be selected and inferred individually, or all frames can be processed with Run All. No duplicate TIFF files are written to disk.
 
@@ -46,9 +46,9 @@ Application and setup logs are stored under `%LOCALAPPDATA%\EchoSight\2.0\logs`.
 
 For a production machine without internet, Git, Python, or package-repository access, use the verified Windows x64 portable package:
 
-- Archive: `artifacts/EchoSight2-2.0.3-windows-x64.zip`
-- Size: 64,288,340 bytes
-- SHA-256: `ac73cc963b3710eeb2f3848a123df50f3f977dc7e3b68a942c53220ce372cace`
+- Archive: `artifacts/EchoSight2-2.0.4-windows-x64.zip`
+- Size: 64,288,321 bytes
+- SHA-256: `f68525d956cf7e6de7020b821195f58afe5e058a344829dd8c0ef07b26fd53e4`
 - Use: copy the archive, verify the hash, extract it locally, and run `EchoSight2.exe`
 
 The portable package bundles Python and runtime dependencies. It needs no installation or internet connection. A source deployment can also be installed offline by preparing a Python 3.9 wheelhouse on a connected staging machine and installing with `pip --no-index --find-links`.
@@ -109,7 +109,7 @@ Inference continues after an individual frame failure so successful frames and f
 
 Ctrl-click or Shift-click the required Results rows, with up to three selected frames from each source TIFF, hide any annotations that should not be included, and select **Generate Report**. EchoSight groups the selected frames by source TIFF and creates one consistently formatted 16:9 slide per VID. Each image has a highlighted, editable Image Description placeholder so the author can identify the image without tying the report to a particular inspection domain. The VID is extracted from a `Z` identifier in the filename or from its trailing five digits.
 
-Generated slides inherit the bundled Intel master background, logo, confidentiality label, and slide numbering. The `PQE SID JFDL FIFA` department name is a normal editable textbox on every slide so another group can replace it directly in PowerPoint. EchoSight keeps report content above the branded footer. If the template asset is missing or invalid, report generation falls back automatically to the established standard white design with the same editable department textbox.
+Generated slides inherit the bundled Intel master background, logo, confidentiality label, and slide numbering. The `PQE SID JFDL FIFA` department name is a normal editable textbox on every slide so another group can replace it directly in PowerPoint. Generated report text uses the same minor-theme font and `TEXT_1` theme color as that footer by default. EchoSight keeps report content above the branded footer. If the template asset is missing or invalid, report generation falls back automatically to the established standard white design with the same editable department textbox and typography.
 
 Each slide contains one compact, highlighted, editable text field for each entry, combining its label and value so formatting remains consistent while the author updates Sighting, Visual ID, and Comments directly in PowerPoint. Fields are sized to their initial text rather than stretched across unused slide area. Slides preserve active preprocessing, overlays, and annotation styling while excluding hidden annotations. Dual-model results are placed side by side within the corresponding frame image. Each slide includes an editable AI-verification notice at the lower right that the engineer can delete after validating the results.
 

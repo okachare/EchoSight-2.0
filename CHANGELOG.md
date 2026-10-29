@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.0.4] - 2026-10-29
+
+### Changed
+- Matched generated PowerPoint report text to the editable `PQE SID JFDL FIFA` footer by using the Intel template's minor-theme font and `TEXT_1` theme color by default.
+- Retained the existing field sizes, alignment, yellow editable-field highlights, adaptive layouts, and footer-safe positioning.
+
+### Validation
+- All 93 workspace tests pass with 3 expected private-fixture skips; the focused reporting suite passes all 14 tests.
+- Ruff, editor diagnostics, whitespace checks, and a PowerPoint-rendered three-image visual pass.
+- Verified `EchoSight2-2.0.4-windows-x64.zip` at 64,288,321 bytes with SHA-256 `f68525d956cf7e6de7020b821195f58afe5e058a344829dd8c0ef07b26fd53e4`; packaged diagnostics pass.
+
 ## [2.0.3] - 2026-10-29
 
 ### Added

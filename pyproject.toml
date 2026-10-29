@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "echosight2"
-version = "2.0.3"
+version = "2.0.4"
 description = "Offline model-agnostic image inference and inspection"
 requires-python = ">=3.9,<3.10"
 dependencies = [

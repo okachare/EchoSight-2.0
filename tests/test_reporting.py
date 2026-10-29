@@ -17,6 +17,7 @@ from echosight2.reporting import (
 )
 from PIL import Image
 from pptx import Presentation
+from pptx.enum.dml import MSO_THEME_COLOR
 
 
 def test_powerpoint_author_prefers_office_profile() -> None:
@@ -143,6 +144,10 @@ def test_generates_one_formatted_slide_per_vid(tmp_path: Path) -> None:
     assert editable_fields["Sighting: [Enter sighting]"].width / 914_400 < 2.2
     assert editable_fields["Visual ID: Z00095"].width / 914_400 < 1.6
     assert editable_fields["Comments: [Enter comments]"].width / 914_400 < 2.0
+    for field in editable_fields.values():
+        font = field.text_frame.paragraphs[0].runs[0].font
+        assert font.name == "+mn-lt"
+        assert font.color.theme_color == MSO_THEME_COLOR.TEXT_1
     description_widths = [
         shape.width / 914_400
         for shape in presentation.slides[0].shapes
