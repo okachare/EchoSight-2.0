@@ -6,7 +6,7 @@ EchoSight 2.0 is a clean rebuild of the EchoSight deployment tool. The applicati
 
 ## Current Status
 
-EchoSight 2.0.1 was published on 2026-10-28. It provides parent-folder model discovery, package-collateral inspection, model-driven preprocessing and thresholds, CPU inference, normalized task-specific results, responsive background execution, a resizable Analysis/Results interface, reproducible run export, retraining feedback, and adaptive PowerPoint reporting.
+EchoSight 2.0.2 was published on 2026-10-28. It provides parent-folder model discovery, package-collateral inspection, model-driven preprocessing and thresholds, CPU inference, normalized task-specific results, responsive background execution, a resizable Analysis/Results interface, reproducible run export, retraining feedback, and adaptive PowerPoint reporting.
 
 Multi-frame TIFF pages are expanded into independent in-memory frames. Each frame can be selected and inferred individually, or all frames can be processed with Run All. No duplicate TIFF files are written to disk.
 
@@ -14,7 +14,7 @@ Oversized single-frame, contiguous, uncompressed 8-bit grayscale/palette TIFFs u
 
 Tile outputs are merged incrementally and released before the next tile, followed by a visible **Consolidating** phase with spatially indexed duplicate suppression. Result labels use spatial collision indexing, and annotation visibility controls are paged at 100 entries, preventing high-count results from blocking the Tk interface at completion.
 
-Current validation: 90 automated tests pass and 3 unavailable private-fixture tests skip as expected. The standalone checkout passes 87 tests with 6 private-fixture skips. Packaged diagnostics pass, and the shared deployment contains 23 manifest-tracked runtime files with zero missing files or hash mismatches. Phase 4 acceptance processed all 66 TIFF pages with the real `NVL_S28C_Detect_09092026_V17` package, producing 93 detections with no failed frames. `Test_Run_Instance_Segmentation` follows its embedded anomaly contract and also completed inference and export successfully. The real `NCL_S_ChainedModel_Test` package compiled and ran both stages, produced three detector ROIs and 12 ordered stage annotations, and preserved both model hashes in exports.
+Current validation: 92 automated tests pass and 3 unavailable private-fixture tests skip as expected. The standalone checkout passes 89 tests with 6 private-fixture skips. Packaged diagnostics pass, and the shared deployment contains 23 manifest-tracked runtime files with zero missing files or hash mismatches. Phase 4 acceptance processed all 66 TIFF pages with the real `NVL_S28C_Detect_09092026_V17` package, producing 93 detections with no failed frames. `Test_Run_Instance_Segmentation` follows its embedded anomaly contract and also completed inference and export successfully. The real `NCL_S_ChainedModel_Test` package compiled and ran both stages, produced three detector ROIs and 12 ordered stage annotations, and preserved both model hashes in exports.
 
 ## Shared Network Setup
 
@@ -46,9 +46,9 @@ Application and setup logs are stored under `%LOCALAPPDATA%\EchoSight\2.0\logs`.
 
 For a production machine without internet, Git, Python, or package-repository access, use the verified Windows x64 portable package:
 
-- Archive: `artifacts/EchoSight2-2.0.1-windows-x64.zip`
-- Size: 55,016,820 bytes
-- SHA-256: `77c76b794130c564cac0661f2f76961429e17afc33c758e98b802575b415a37f`
+- Archive: `artifacts/EchoSight2-2.0.2-windows-x64.zip`
+- Size: 55,017,252 bytes
+- SHA-256: `9c6272b3cf5939d507b39808cc41ce55479f88f9b415c9cba334c0701a826ab8`
 - Use: copy the archive, verify the hash, extract it locally, and run `EchoSight2.exe`
 
 The portable package bundles Python and runtime dependencies. It needs no installation or internet connection. A source deployment can also be installed offline by preparing a Python 3.9 wheelhouse on a connected staging machine and installing with `pip --no-index --find-links`.
@@ -85,7 +85,7 @@ The model's embedded confidence threshold remains the default. Experienced revie
 - Per-frame or all-frame Annotation Control for Calibri label size, annotation color, line thickness, and independent annotation/label transparency
 - One-click 16:9 PowerPoint reports with up to three selected Results frames per TIFF/VID, adaptive non-overlapping layouts, compact editable fields, preserved active annotation styling, and hidden-annotation exclusion
 - Multi-select Results actions that save original frames as False Hits or Misses for model retraining
-- Mouse-wheel zoom, drag-to-pan, and double-click fit reset in both previews
+- Mouse-wheel zoom and drag-to-pan in both previews, preserving each pane's viewport while cycling frames; double-click resets fit-to-view
 - Results zoom up to 1024x with viewport-only rendering for detailed wafer inspection
 - Scrollable Results Details retaining every annotation-specific entry
 - Latest-only background annotation redraws for responsive high-count checkbox and style changes

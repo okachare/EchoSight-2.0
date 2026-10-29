@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.0.2] - 2026-10-28
+
+### Changed
+- Preserved each Analysis and Results image pane's zoom and pan position while cycling between frames; double-click remains the explicit fit-to-view reset.
+- Made portable builds prefer `.venv-dev` and read the package version directly from the current source tree.
+
+### Validation
+- All 92 workspace tests pass with 3 expected private-fixture skips; packaged dependency diagnostics pass.
+- Verified `EchoSight2-2.0.2-windows-x64.zip` at 55,017,252 bytes with SHA-256 `9c6272b3cf5939d507b39808cc41ce55479f88f9b415c9cba334c0701a826ab8`.
+
 ## [2.0.1] - 2026-10-28
 
 ### Published

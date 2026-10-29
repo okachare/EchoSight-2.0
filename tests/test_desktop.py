@@ -356,6 +356,49 @@ def test_canvas_zoom_reaches_high_magnification_without_exceeding_bound() -> Non
     canvas._draw.assert_called()
 
 
+def test_analysis_frame_change_preserves_canvas_view() -> None:
+    app = object.__new__(EchoSightApp)
+    app.current_analysis_index = 0
+    app.analysis_canvas = Mock()
+    app.preprocess_popup = Mock()
+    app.frames = [
+        Mock(is_optimized=False, display_name="Frame 1", image=Image.new("RGB", (64, 48))),
+        Mock(is_optimized=False, display_name="Frame 2", image=Image.new("RGB", (64, 48))),
+    ]
+    app._refresh_analysis = Mock()
+    app.status_text = Mock()
+
+    app._select_analysis_frame(1)
+
+    app.analysis_canvas.reset_view.assert_not_called()
+    assert app.current_analysis_index == 1
+
+
+def test_result_frame_change_preserves_both_canvas_views() -> None:
+    app = object.__new__(EchoSightApp)
+    app.current_result_index = 0
+    app.results_canvas = Mock()
+    app.secondary_results_canvas = Mock()
+    app.annotation_page = 3
+    app.annotation_popup = Mock()
+    app.frames = [Mock(), Mock()]
+    app.image_list = Mock()
+    app.results = {0: _result(0.81), 1: _result(0.91)}
+    app.secondary_results = {}
+    app.result_list = Mock(selection=Mock(return_value=("1",)))
+    app._select_analysis_frame = Mock()
+    app._refresh_result = Mock()
+    app._show_result_details = Mock()
+
+    app._select_result_frame(1)
+
+    app.results_canvas.reset_view.assert_not_called()
+    app.secondary_results_canvas.reset_view.assert_not_called()
+    app._select_analysis_frame.assert_called_once_with(1)
+    assert app.current_result_index == 1
+    assert app.annotation_page == 0
+
+
 def test_result_redraw_coalesces_to_latest_request() -> None:
     app = object.__new__(EchoSightApp)
     app.current_result_index = 0

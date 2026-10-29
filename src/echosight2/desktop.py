@@ -1210,7 +1210,7 @@ class EchoSightApp(tk.Tk):
             self._select_analysis_frame(active if active in selection else selection[0])
 
     def _select_analysis_frame(self, index: int) -> None:
-        if index != self.current_analysis_index:
+        if self.current_analysis_index is None:
             self.analysis_canvas.reset_view()
         self.current_analysis_index = index
         if self.preprocess_popup is None:
@@ -1559,9 +1559,10 @@ class EchoSightApp(tk.Tk):
             self.result_list.heading(column, text=label + indicator, command=lambda key=column: self._sort_results(key))
 
     def _select_result_frame(self, index: int) -> None:
-        if index != self.current_result_index:
+        if self.current_result_index is None:
             self.results_canvas.reset_view()
             self.secondary_results_canvas.reset_view()
+        if index != self.current_result_index:
             self.annotation_page = 0
         self.current_result_index = index
         if self.annotation_popup is None:

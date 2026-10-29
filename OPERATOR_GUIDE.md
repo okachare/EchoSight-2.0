@@ -11,13 +11,13 @@
 
 Setup is required once for each Windows user profile and requires Python 3.9 plus access to the configured Python package source. Dependencies are installed under `%LOCALAPPDATA%\EchoSight\2.0`; the shared application files are not modified.
 
-The source setup is not fully offline because `pip` must resolve the runtime packages. On an isolated work system, use the verified `EchoSight2-2.0.1-windows-x64.zip` portable package instead: verify SHA-256 `77c76b794130c564cac0661f2f76961429e17afc33c758e98b802575b415a37f`, extract it locally, and run `EchoSight2.exe`. The portable package requires neither Python nor internet access.
+The source setup is not fully offline because `pip` must resolve the runtime packages. On an isolated work system, use the verified `EchoSight2-2.0.2-windows-x64.zip` portable package instead: verify SHA-256 `9c6272b3cf5939d507b39808cc41ce55479f88f9b415c9cba334c0701a826ab8`, extract it locally, and run `EchoSight2.exe`. The portable package requires neither Python nor internet access.
 
 ### Later use
 
 Double-click `Launch_EchoSight.bat` in the shared folder. Run `SETUP.ps1` again only when setup reports a problem or the published requirements change.
 
-Release validation: 90 workspace tests pass with 3 expected private-fixture skips. The shared 2.0.1 deployment contains 23 manifest-tracked files with zero hash mismatches, and packaged dependency diagnostics pass.
+Release validation: 92 workspace tests pass with 3 expected private-fixture skips. The shared 2.0.2 deployment contains 23 manifest-tracked files with zero hash mismatches, and packaged dependency diagnostics pass.
 
 ## Inspect Images
 
@@ -51,7 +51,7 @@ After the final full-resolution tile, the status changes to **Consolidating** wh
 
 Select an annotation's text in **Annotations**, or select its box in the Results image, to add or remove it from the current frame's selection. Selected annotations use a high-contrast gold highlight in both places. Under **Overlays**, choose **Show all annotations** for the complete enabled set or **Show selected annotations** to isolate only the selected items. Selection is independent for every frame and model pane, so a small review set can be retained while navigating dense results.
 
-Use the mouse wheel over either image preview to zoom and drag the image to pan. Results supports up to 1024x fit-relative zoom for close wafer inspection while rendering only the visible viewport. Double-click the preview to restore fit-to-view. In Analysis, select the settings icon at the lower-right of the preview to adjust brightness, contrast, sharpness, and exact denoise strength. Changes preview immediately. Select **Apply to current frame** or **Apply to all frames** to choose the processing scope used by inference and exports.
+Use the mouse wheel over either image preview to zoom and drag the image to pan. Analysis and each Results model pane retain their own zoom and pan position while you cycle through frames, making the same image region easy to compare. Results supports up to 1024x fit-relative zoom for close wafer inspection while rendering only the visible viewport. Double-click a preview to restore that pane to fit-to-view. In Analysis, select the settings icon at the lower-right of the preview to adjust brightness, contrast, sharpness, and exact denoise strength. Changes preview immediately. Select **Apply to current frame** or **Apply to all frames** to choose the processing scope used by inference and exports.
 
 In Results, select the color-wheel icon at the lower-right of the preview to open **Annotation Control**. Adjust label font size, annotation color, line thickness, annotation transparency, or label transparency. Changes preview live in Results only; Analysis always shows the unannotated image with its active image adjustments. Select **Apply to current frame** or **Apply to all frames** to choose the export scope. Select **Reset** to restore the standard per-class palette and default styling.
 

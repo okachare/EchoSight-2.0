@@ -4,7 +4,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProjectRoot = $PSScriptRoot
-$Python = Join-Path $ProjectRoot '.venv\Scripts\python.exe'
+$PythonCandidates = @(
+    (Join-Path $ProjectRoot '.venv-dev\Scripts\python.exe'),
+    (Join-Path $ProjectRoot '.venv\Scripts\python.exe')
+)
+$Python = $PythonCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 $ArtifactRoot = Join-Path $ProjectRoot 'artifacts'
 $StagingRoot = Join-Path $env:TEMP ("EchoSight2-build-{0}" -f [guid]::NewGuid().ToString('N'))
 $WorkPath = Join-Path $StagingRoot 'work'
@@ -25,11 +29,12 @@ function Invoke-Checked {
     }
 }
 
-if (-not (Test-Path $Python)) {
-    throw "EchoSight virtual environment not found: $Python. Run SETUP.ps1 first."
+if (-not $Python) {
+    throw "EchoSight build environment not found. Create .venv-dev and install requirements-dev.txt first."
 }
 
-$Version = (& $Python -c "from echosight2 import __version__; print(__version__)").Trim()
+$PackageSource = Join-Path $ProjectRoot 'src'
+$Version = (& $Python -c "import sys; sys.path.insert(0, sys.argv[1]); from echosight2 import __version__; print(__version__)" $PackageSource).Trim()
 if ($LASTEXITCODE -ne 0 -or -not $Version) {
     throw 'Could not determine the EchoSight version.'
 }
