@@ -4,6 +4,7 @@ project_root = Path(SPECPATH)
 datas = [
     (str(project_root / "README.md"), "."),
     (str(project_root / "OPERATOR_GUIDE.md"), "."),
+    (str(project_root / "src" / "echosight2" / "assets" / "report_template.pptx"), "echosight2/assets"),
 ]
 hiddenimports = [
     "openvino",

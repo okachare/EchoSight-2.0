@@ -83,6 +83,7 @@ def test_report_layout_boxes_do_not_overlap(image_count: int) -> None:
 
     assert len(layout.placements) == image_count
     assert all(box.left >= 0 and box.top >= 0 and box.right <= 13.3334 and box.bottom <= 7.5 for box in boxes)
+    assert all(box.bottom <= 6.851 for box in boxes)
     assert all(not _boxes_overlap(first, second) for index, first in enumerate(boxes) for second in boxes[index + 1 :])
 
 
@@ -116,12 +117,18 @@ def test_generates_one_formatted_slide_per_vid(tmp_path: Path) -> None:
     assert presentation.core_properties.author == "Office Operator"
     assert presentation.core_properties.title == "EchoSight Inspection Report"
     assert len(presentation.slides) == 2
+    assert presentation.slides[0].slide_layout.name == "Title and Content"
+    assert not presentation.slides[0].placeholders
+    master_text = "\n".join(shape.text for shape in presentation.slide_masters[0].shapes if hasattr(shape, "text_frame"))
+    assert "PQE SID JFDL FIFA" not in master_text
+    assert "Intel Confidential" in master_text
     assert sum(1 for shape in presentation.slides[0].shapes if shape.shape_type == 13) == 3
     first_slide_fields = [shape.text for shape in presentation.slides[0].shapes if hasattr(shape, "text_frame")]
     first_slide_text = "\n".join(first_slide_fields)
     assert "Sighting: [Enter sighting]" in first_slide_fields
     assert "Visual ID: Z00095" in first_slide_fields
     assert "Comments: [Enter comments]" in first_slide_fields
+    assert "PQE SID JFDL FIFA" in first_slide_fields
     assert "Sighting:" not in first_slide_fields
     assert "Visual ID:" not in first_slide_fields
     assert "Comments:" not in first_slide_fields
@@ -142,6 +149,24 @@ def test_generates_one_formatted_slide_per_vid(tmp_path: Path) -> None:
         if hasattr(shape, "text_frame") and shape.text == "[Enter image description]"
     ]
     assert all(width < 1.8 for width in description_widths)
+    for slide in presentation.slides:
+        department = next(shape for shape in slide.shapes if getattr(shape, "text", "") == "PQE SID JFDL FIFA")
+        assert not department.is_placeholder
+        assert department.left / 914_400 == pytest.approx(0.7, abs=0.001)
+        assert department.top / 914_400 == pytest.approx(7.125)
+
+
+def test_report_falls_back_when_template_is_unavailable(tmp_path: Path) -> None:
+    destination = tmp_path / "fallback_report.pptx"
+    slides = [ReportSlide("Z00095", (ReportImage(Image.new("RGB", (100, 100), "black")),))]
+
+    report = generate_powerpoint_report(destination, slides, author="Office Operator", template_path=tmp_path / "missing.pptx")
+
+    presentation = Presentation(report.path)
+    master_text = "\n".join(shape.text for shape in presentation.slide_masters[0].shapes if hasattr(shape, "text_frame"))
+    assert "PQE SID JFDL FIFA" not in master_text
+    assert any(getattr(shape, "text", "") == "PQE SID JFDL FIFA" for shape in presentation.slides[0].shapes)
+    assert len(presentation.slides) == 1
 
 
 def test_report_requires_slides_with_one_to_three_images(tmp_path: Path) -> None:

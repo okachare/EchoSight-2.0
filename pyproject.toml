@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "echosight2"
-version = "2.0.2"
+version = "2.0.3"
 description = "Offline model-agnostic image inference and inspection"
 requires-python = ">=3.9,<3.10"
 dependencies = [
@@ -21,6 +21,9 @@ echosight2-diagnostics = "echosight2.diagnostics:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+echosight2 = ["assets/*.pptx"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

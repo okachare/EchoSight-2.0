@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.0.3] - 2026-10-29
+
+### Added
+- Bundled the provided Intel PowerPoint template for generated reports, preserving its dark master background, Intel logo, confidentiality marking, and slide numbering.
+- Added `PQE SID JFDL FIFA` as an editable textbox on every generated slide so each group can replace the department name directly in PowerPoint.
+- Automatic fallback to the established standard report design when the bundled template cannot be loaded.
+
+### Changed
+- Reserved the branded footer area while retaining adaptive one-to-three-image layouts, compact editable fields, hidden-annotation filtering, and dual-model evidence.
+
+### Validation
+- All 93 workspace tests pass with 3 expected private-fixture skips; a PowerPoint-rendered three-image report has no footer overlap.
+- The published portable build contains a byte-identical 9,291,156-byte template asset and passes packaged diagnostics.
+- Verified `EchoSight2-2.0.3-windows-x64.zip` at 64,288,340 bytes with SHA-256 `ac73cc963b3710eeb2f3848a123df50f3f977dc7e3b68a942c53220ce372cace`.
+
 ## [2.0.2] - 2026-10-28
 
 ### Changed
